@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+# local working files (single-machine, not synced)
+ration.md
+pills.md
+data/profile.json
+.claude/settings.local.json
+
+# medical tracking — single-device, never published
+config/medications.md
+config/meds/
