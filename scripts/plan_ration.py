@@ -30,8 +30,8 @@ from collections import defaultdict
 from datetime import date
 from pathlib import Path
 
-from summary import (GROUP_QUOTA, GROUP_ORDER, week_range, cycle_phase,
-                     protein_floor, group_servings)
+from summary import (GROUP_QUOTA, GROUP_ORDER, GRAM_GROUPS, week_range,
+                     cycle_phase, protein_floor, group_servings)
 from profile import parse_food_rows
 from paths import DB_PATH, PROFILE_PATH, diary_path
 
@@ -147,7 +147,7 @@ def limit_headroom(servings):
 def fits_limits(dish, room):
     """A dish is allowed only if it doesn't push any limit group past its cap."""
     for g, w in dish['groups'].items():
-        if g in room and w > room[g] + 1e-9:
+        if g in room and dish_servings(dish, g, w) > room[g] + 1e-9:
             return False
     return True
 
@@ -163,6 +163,14 @@ def behind_floors(servings):
             out.append((g, got / q if q else 1.0))
     out.sort(key=lambda x: x[1])
     return [g for g, _ in out]
+
+
+def dish_servings(dish, group, weight):
+    """Servings a dish contributes to `group`. Gram-anchored groups (рыба/птица)
+    count grams*meat_fraction/100; others count the flat weight."""
+    if group in GRAM_GROUPS:
+        return dish['grams'] * weight / 100.0
+    return weight
 
 
 def pick_for_group(group, dishes, used, room, kcal_left, eaten, seed):
@@ -188,7 +196,7 @@ def commit(dish, ration, servings, used, group_count):
     ration.append(dish)
     used.add(dish['name'])
     for g, w in dish['groups'].items():
-        servings[g] += w
+        servings[g] += dish_servings(dish, g, w)
         group_count[g] += 1
 
 

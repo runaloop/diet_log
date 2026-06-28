@@ -24,11 +24,18 @@ from paths import DB_PATH, GOALS, CYCLE, USER, diary_path
 # floor = добираем, limit = не превышаем. Groups without a quota omitted.
 GROUP_QUOTA = {
     'овощи': ('floor', 9), 'фрукты': ('floor', 8), 'злаки': ('floor', 7),
-    'бобовые': ('floor', 3), 'рыба': ('floor', 3), 'орехи': ('floor', 7),
+    'бобовые': ('floor', 3), 'рыба': ('floor', 5), 'орехи': ('floor', 7),
     'молочка': ('floor', 7), 'яйца': ('floor', 2),
-    'птица': ('limit', 3), 'красное_мясо': ('limit', 1),
+    'птица': ('limit', 4), 'красное_мясо': ('limit', 1),
     'сладкое': ('limit', 2), 'добавки': ('limit', 7),
 }
+
+# Gram-anchored groups (STRATEGY.md §6a): 1 serving = 100 g of meat/fish as
+# eaten. product_group.weight is the *meat fraction* of the dish (1.0 = pure
+# cut, 0.1 = soup with a little chicken, >1 = dehydrated concentrate like
+# jerky). servings = grams_logged * weight / 100. All other groups stay
+# event-flag based (weight summed as-is).
+GRAM_GROUPS = {'рыба', 'птица'}
 GROUP_ORDER = ['рыба', 'бобовые', 'овощи', 'фрукты', 'злаки', 'орехи', 'молочка',
              'яйца', 'птица', 'красное_мясо', 'сладкое', 'добавки']
 
@@ -419,8 +426,10 @@ def load_catalog_groups():
 def group_servings(start: date, end: date):
     """Sum food-group servings over the diaries in [start, end].
 
-    Each logged food row contributes its product's group weights as servings
-    (portion size ignored — a yogurt is a serving). Returns (servings, unmatched).
+    Each logged food row contributes its product's group weights as servings.
+    Most groups are event-flag based (portion ignored — a yogurt is a serving);
+    GRAM_GROUPS (рыба/птица) count grams*weight/100 instead (STRATEGY.md §6a).
+    Returns (servings, unmatched).
     """
     from profile import parse_food_rows  # reuse diary food-row parser
 
@@ -433,13 +442,16 @@ def group_servings(start: date, end: date):
     while d <= end:
         path = diary_path(d)
         if path.exists():
-            for name, *_ in parse_food_rows(path.read_text().split('\n')):
+            for name, grams, *_ in parse_food_rows(path.read_text().split('\n')):
                 groups = catalog.get(name.lower())
                 if groups is None:
                     unmatched.append(name)
                 else:
                     for g, w in groups:
-                        servings[g] += w
+                        if g in GRAM_GROUPS and grams:
+                            servings[g] += grams * w / 100.0
+                        else:
+                            servings[g] += w
         d += timedelta(days=1)
     return servings, unmatched
 
