@@ -28,4 +28,9 @@ fi
 ln -sf "$today" today.md
 echo "today.md -> $today"
 
+# 5. ensure today's ration.md exists (base plan; agent enriches with leftovers).
+#    Idempotent: skips if ration.md already targets today.
+python3 scripts/plan_ration.py today.md --write || echo "ration skipped"
+python3 scripts/format_tables.py ration.md 2>/dev/null || true
+
 echo "setup done."

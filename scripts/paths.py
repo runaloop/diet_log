@@ -13,6 +13,7 @@ DIARIES = ROOT / 'diaries'
 
 DB_PATH = DATA / 'diet.db'
 PROFILE_PATH = DATA / 'profile.json'
+RATION = ROOT / 'ration.md'
 GOALS = CONFIG / 'goals.md'
 CYCLE = CONFIG / 'cycle.md'
 USER = CONFIG / 'user.md'

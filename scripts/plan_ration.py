@@ -33,7 +33,7 @@ from pathlib import Path
 from summary import (GROUP_QUOTA, GROUP_ORDER, GRAM_GROUPS, week_range,
                      cycle_phase, protein_floor, group_servings)
 from profile import parse_food_rows
-from paths import DB_PATH, PROFILE_PATH, diary_path
+from paths import DB_PATH, PROFILE_PATH, RATION, diary_path
 
 # Daily caps so the suggestion is a sane day, not a feast. The kcal ceiling is
 # the real size limiter; these stop one group from monopolising the plate.
@@ -354,6 +354,29 @@ def render(plan, ration, floor, servings, cphase):
         print(f"Остаток потолка после добора: {plan['kcal'] - tk:.0f}к.")
 
 
+def render_ration_md(ref, ration):
+    """ration.md checklist format (AGENTS.md §Рекомендуемый рацион). Base plan
+    only — no yesterday's leftovers (the agent prepends those interactively)."""
+    out = [f'# Рекомендуемый рацион {ref.isoformat()}', '',
+           '| · | Блюдо | К | Б | Ж | У | Съедено |',
+           '| --- | --- | --- | --- | --- | --- | --- |']
+    for d in ration:
+        label = f"{d['name']} {d['grams']:.0f}г"
+        out.append(f"| 🔲 | {label} | {d['k']:.0f} | {d['b']:.0f} | "
+                   f"{d['zh']:.0f} | {d['u']:.0f} | |")
+    return '\n'.join(out) + '\n'
+
+
+def ration_is_current(ref):
+    """True if ration.md exists and its H1 date equals `ref` (don't clobber a
+    live file with its checkmarks / leftovers)."""
+    if not RATION.exists():
+        return False
+    first = RATION.read_text(encoding='utf-8').split('\n', 1)[0]
+    m = re.search(r'(\d{4}-\d{2}-\d{2})', first)
+    return bool(m and m.group(1) == ref.isoformat())
+
+
 def date_seed(arg):
     p = Path(arg)
     try:
@@ -377,18 +400,32 @@ def diary_date(arg):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        print(f'Usage: {sys.argv[0]} <diary.md>')
+    pos = [a for a in sys.argv[1:] if not a.startswith('--')]
+    flags = {a for a in sys.argv[1:] if a.startswith('--')}
+    if len(pos) != 1:
+        print(f'Usage: {sys.argv[0]} <diary.md> [--write]')
         sys.exit(1)
-    text = Path(sys.argv[1]).read_text(encoding='utf-8')
-    ref = diary_date(sys.argv[1])
+    diary_arg = pos[0]
+    text = Path(diary_arg).read_text(encoding='utf-8')
+    ref = diary_date(diary_arg)
     week_start, _ = week_range(ref)
     plan = parse_plan(text)
     dishes = load_dishes()
     servings, _ = group_servings(week_start, ref)
     servings = servings or {}
     eaten = eaten_this_week(week_start, ref)
-    seed = date_seed(sys.argv[1])
+    seed = date_seed(diary_arg)
     cphase = cycle_phase(week_start)
     ration, floor = build(plan, dishes, dict(servings), eaten, seed, cphase)
-    render(plan, ration, floor, dict(servings), cphase)
+    # --write: ensure ration.md exists for this day (base plan, no leftovers).
+    # Never clobber a current-day file — that would wipe checkmarks/leftovers.
+    if '--write' in flags:
+        if ration_is_current(ref):
+            print(f'ration.md уже на {ref} — не трогаю.')
+        elif not ration:
+            print('Добор не нужен — ration.md не создаю.')
+        else:
+            RATION.write_text(render_ration_md(ref, ration), encoding='utf-8')
+            print(f'ration.md создан на {ref} ({len(ration)} блюд).')
+    else:
+        render(plan, ration, floor, dict(servings), cphase)
