@@ -59,17 +59,17 @@ SUPP_CAP = 1          # at most one supplement/shake in a ration
 
 def grab(text, pat):
     m = re.search(pat, text)
-    return float(m.group(1)) if m else None
+    return float(m.group(1).replace('−', '-')) if m else None
 
 
 def parse_plan(text):
     """Today's soft budget from the `## План` block: kcal ceiling + protein eaten."""
     m = re.search(r'Фаза цикла:\s*(\S+)', text)
     phase = m.group(1) if m else 'дефицит'
-    if phase.startswith('дефицит'):
-        kcal = grab(text, r'сохранить дефицит[^)]*\):\s*(-?[\d.]+)')
-    else:
-        kcal = grab(text, r'выйти в 0 по ккал\):\s*(-?[\d.]+)')
+    # `Можно съесть ...: <ceiling> ккал`. Tolerates both the compact format
+    # (`до −500:` / `до 0:`, AGENTS.md) and the legacy verbose one
+    # (`(чтобы сохранить дефицит 500 ккал):`). Minus may be ASCII `-` or U+2212.
+    kcal = grab(text, r'Можно съесть[^:]*:\s*([−-]?[\d.]+)')
     prot_eaten = grab(text, r'Белок:[^(]*\(съедено:\s*([\d.]+)') or 0.0
     carb_rem = grab(text, r'Углеводы:[^)]*осталось:\s*([\d.]+)') or 0.0
     spent = grab(text, r'Потрачено:\s*([\d.]+)') or 0.0
@@ -79,7 +79,7 @@ def parse_plan(text):
 
 
 def load_catalog():
-    """name(lower) -> {'groups': [(g, w)], 'prep': str|None}."""
+    """name(lower) -> {'groups': [(g, w)], 'prep': str|None, 'priority': int}."""
     con = sqlite3.connect(DB_PATH)
     pg = defaultdict(list)
     for pid, g, w in con.execute(
@@ -87,11 +87,13 @@ def load_catalog():
                JOIN food_group mg ON mg.id = pg.group_id"""):
         pg[pid].append((g, w))
     out = {}
-    for pid, name, prep in con.execute('SELECT id, name, prep_effort FROM product'):
-        out[name.lower()] = {'groups': pg.get(pid, []), 'prep': prep}
+    for pid, name, prep, prio in con.execute(
+            'SELECT id, name, prep_effort, priority FROM product'):
+        out[name.lower()] = {'groups': pg.get(pid, []), 'prep': prep,
+                             'priority': prio}
     for pid, text in con.execute('SELECT product_id, text FROM alias'):
         out.setdefault(text.lower(), {'groups': pg.get(pid, []),
-                                      'prep': None})
+                                      'prep': None, 'priority': 0})
     con.close()
     return out
 
@@ -117,6 +119,7 @@ def load_dishes():
             'zh': pgm['zh'] * g, 'u': pgm['u'] * g,
             'groups': groups,
             'prep': cat['prep'],
+            'priority': cat.get('priority', 0),
             'supp': SUPP_GROUP in groups,
         })
     return dishes
@@ -182,9 +185,11 @@ def pick_for_group(group, dishes, used, room, kcal_left, eaten, seed):
              and fits_limits(d, room)]
     if not cands:
         return None
-    # fresh (not eaten this week) → low-prep → more of this group → date rotation
+    # fresh (not eaten this week) → higher priority → low-prep → more of this
+    # group → date rotation
     cands.sort(key=lambda d: (
         d['name'].lower() in eaten,
+        -d['priority'],
         PREP_RANK.get(d['prep'], 1.5),
         -d['groups'][group],
         (d['count'] + seed) % 5,
@@ -222,6 +227,7 @@ def carb_fill(dishes, target, ration, servings, used, room, kcal_left, eaten, se
             return sum(1 for r in ration if r['groups'].keys() & d['groups'].keys())
         cands.sort(key=lambda d: (
             d['name'].lower() in eaten,
+            -d['priority'],
             overlap(d),
             PREP_RANK.get(d['prep'], 1.5),
             -(d['u'] * 4 / d['k']),
@@ -246,8 +252,9 @@ def protein_topup(dishes, rem_prot, ration, servings, used, room, seed):
                  and not (d['supp'] and supp_used >= SUPP_CAP)]
         if not cands:
             break
-        # cheapest kcal per gram of protein; whole food before supplements
-        cands.sort(key=lambda d: (d['supp'], d['k'] / d['b'],
+        # whole food before supplements; higher priority first; then cheapest
+        # kcal per gram of protein
+        cands.sort(key=lambda d: (d['supp'], -d['priority'], d['k'] / d['b'],
                                   (d['count'] + seed) % 5))
         d = cands[0]
         commit(d, ration, servings, used, defaultdict(int))

@@ -11,6 +11,8 @@ Subcommands:
   find SUBSTR          grep products by name or alias
   q "SQL"              run a raw read-only query
   tag NAME g=w …       set a product's food-group weights (clears review)
+  priority NAME N      set a product's planner priority (0 default, <0 demote)
+  rename OLD NEW       rename a product (keeps id → groups/aliases survive)
   review               list products still needing group tagging
 
 Schema:
@@ -56,7 +58,9 @@ CREATE TABLE IF NOT EXISTS product (
   k           REAL, b REAL, zh REAL, u REAL, fiber REAL,
   prep_effort TEXT,
   estimated   INTEGER NOT NULL DEFAULT 0,
-  review      INTEGER NOT NULL DEFAULT 1
+  review      INTEGER NOT NULL DEFAULT 1,
+  fat_quality TEXT NOT NULL DEFAULT 'neutral',
+  priority    INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS alias (
   product_id INTEGER NOT NULL REFERENCES product(id) ON DELETE CASCADE,
@@ -100,6 +104,16 @@ def connect():
     # SQLite LIKE/LOWER fold case only for ASCII; register a Unicode-aware lower
     # so Cyrillic search ('скрембл' vs 'Скрембл') is case-insensitive.
     con.create_function('ulower', 1, lambda s: s.lower() if s else s)
+    # Idempotent column adds for catalogs predating these fields.
+    for ddl in (
+        "ALTER TABLE product ADD COLUMN fat_quality TEXT NOT NULL DEFAULT 'neutral'",
+        "ALTER TABLE product ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            con.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+    con.commit()
     return con
 
 
@@ -154,18 +168,19 @@ def cmd_add(con, args):
     portion_raw, portion_g = parse_portion(args.port)
     cur = con.execute(
         """INSERT INTO product(name, portion_raw, portion_g, k, b, zh, u, fiber,
-                               prep_effort, estimated, fat_quality)
-           VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?,'neutral'))
+                               prep_effort, estimated, fat_quality, priority)
+           VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?,'neutral'),COALESCE(?,0))
            ON CONFLICT(name) DO UPDATE SET
              portion_raw=excluded.portion_raw, portion_g=excluded.portion_g,
              k=excluded.k, b=excluded.b, zh=excluded.zh, u=excluded.u,
              fiber=excluded.fiber, prep_effort=excluded.prep_effort,
              estimated=excluded.estimated,
-             fat_quality=COALESCE(?, product.fat_quality)
+             fat_quality=COALESCE(?, product.fat_quality),
+             priority=COALESCE(?, product.priority)
            RETURNING id""",
         (args.name, portion_raw, portion_g, args.k, args.b, args.zh, args.u,
          args.fiber, args.prep, int(args.estimate), args.fat_quality,
-         args.fat_quality))
+         args.priority, args.fat_quality, args.priority))
     pid = cur.fetchone()[0]
     if args.alias:
         for a in (x.strip() for x in args.alias.split(',')):
@@ -225,6 +240,31 @@ def cmd_tag(con, args):
     print(f'{args.name}: ' + ', '.join(f'{n}={w:g}' for n, w in tags))
 
 
+def cmd_priority(con, args):
+    cur = con.execute('UPDATE product SET priority = ? WHERE name = ?',
+                      (args.level, args.name))
+    if cur.rowcount == 0:
+        sys.exit(f'priority: продукт не найден: {args.name}')
+    con.commit()
+    print(f'{args.name}: priority={args.level}')
+
+
+def cmd_rename(con, args):
+    if con.execute('SELECT 1 FROM product WHERE name = ?', (args.new,)).fetchone():
+        sys.exit(f'rename: имя уже занято: {args.new}')
+    cur = con.execute('UPDATE product SET name = ? WHERE name = ?',
+                      (args.new, args.old))
+    if cur.rowcount == 0:
+        sys.exit(f'rename: продукт не найден: {args.old}')
+    if args.keep_alias:
+        pid = con.execute('SELECT id FROM product WHERE name = ?',
+                          (args.new,)).fetchone()[0]
+        con.execute('INSERT OR IGNORE INTO alias(product_id, text) VALUES (?,?)',
+                    (pid, args.old))
+    con.commit()
+    print(f'{args.old} → {args.new}')
+
+
 def cmd_review(con, args):
     rows = con.execute(
         'SELECT name FROM product WHERE review = 1 ORDER BY name').fetchall()
@@ -258,6 +298,8 @@ def main():
     a.add_argument('--estimate', action='store_true')
     a.add_argument('--fat-quality', dest='fat_quality',
                    choices=['good', 'neutral', 'bad'])
+    a.add_argument('--priority', type=int,
+                   help='planner priority (0 default, <0 demote, >0 prefer)')
 
     f = sub.add_parser('find')
     f.add_argument('substr')
@@ -269,13 +311,24 @@ def main():
     t.add_argument('name')
     t.add_argument('pairs', nargs='+', help='группа=вес …')
 
+    pr = sub.add_parser('priority')
+    pr.add_argument('name')
+    pr.add_argument('level', type=int)
+
+    rn = sub.add_parser('rename')
+    rn.add_argument('old')
+    rn.add_argument('new')
+    rn.add_argument('--keep-alias', action='store_true',
+                    help='keep the old name as a searchable alias')
+
     r = sub.add_parser('review')
     r.add_argument('--limit', type=int, default=40)
 
     args = p.parse_args()
     con = connect()
     {'init': cmd_init, 'migrate': cmd_migrate, 'add': cmd_add, 'find': cmd_find,
-     'q': cmd_q, 'tag': cmd_tag, 'review': cmd_review}[args.cmd](con, args)
+     'q': cmd_q, 'tag': cmd_tag, 'priority': cmd_priority, 'rename': cmd_rename,
+     'review': cmd_review}[args.cmd](con, args)
     con.close()
 
 
