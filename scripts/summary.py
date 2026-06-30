@@ -386,14 +386,16 @@ def weektrend(ref: date, with_groups: bool = True):
             projected = avg_def * 7
             weekly_target = daily_target * 7
             if phase == 'поддержание':
-                lines.append(f'- Средний суточный дефицит: {avg_def:.0f} ккал (поддержание, цель ~0)')
+                bal_label = 'дефицит' if avg_def >= 0 else 'профицит'
+                lines.append(f'- Средний суточный {bal_label}: {abs(avg_def):.0f} ккал (поддержание, цель ~0)')
             else:
                 lines.append(f'- Средний суточный дефицит: {avg_def:.0f} ккал (цель фазы {daily_target:.0f})')
             if target_protein and avg_prot < target_protein:
                 lines.append(f'- Белок: {avg_prot:.0f}г/день (цель {target_protein}) ⚠ недобор {target_protein - avg_prot:.0f}г/день')
             if phase == 'поддержание':
                 sym = '✓' if abs(projected) <= 700 else '⚠'
-                lines.append(f'- Прогноз недельного баланса при тренде: {projected:+.0f} ккал (поддержание) {sym}')
+                proj_label = 'дефицита' if projected >= 0 else 'профицита'
+                lines.append(f'- Прогноз недельного {proj_label} при тренде: {abs(projected):.0f} ккал (поддержание) {sym}')
             else:
                 sym = status(projected, weekly_target, invert=True)
                 lines.append(f'- Прогноз недельного дефицита при тренде: {projected:.0f} ккал (цель {weekly_target:.0f}) {sym}')
