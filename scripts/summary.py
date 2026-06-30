@@ -512,15 +512,6 @@ def day_med_verdict(ref: date):
     if missed and score < 80:
         lines.append(f'Упущено: {", ".join(missed)}')
 
-    limit_notes = []
-    for g in limits:
-        got = servings_day.get(g, 0.0)
-        if got > 0:
-            pct = round(got / GROUP_QUOTA[g][1] * 100)
-            limit_notes.append(f'{g}: {got:.1f} ({pct}% лимита/нед)')
-    if limit_notes:
-        lines.append(f'Лимиты: {"; ".join(limit_notes)}')
-
     return lines
 
 
