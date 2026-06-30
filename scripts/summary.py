@@ -536,8 +536,7 @@ def rolling7_med_verdict(ref: date):
     floors = [g for g in GROUP_ORDER if GROUP_QUOTA.get(g, ('', 0))[0] == 'floor']
     limits = [g for g in GROUP_ORDER if GROUP_QUOTA.get(g, ('', 0))[0] == 'limit']
 
-    day_hit_rates = []
-    floor_days = defaultdict(int)
+    floor_totals = defaultdict(float)
     limit_totals = defaultdict(float)
     days_with_data = 0
 
@@ -554,32 +553,30 @@ def rolling7_med_verdict(ref: date):
                         servings[g] += w
             if servings:
                 days_with_data += 1
-                hit_today = sum(1 for g in floors if servings.get(g, 0) > 0)
-                day_hit_rates.append(hit_today / len(floors) if floors else 0)
                 for g in floors:
-                    if servings.get(g, 0) > 0:
-                        floor_days[g] += 1
+                    floor_totals[g] += servings.get(g, 0)
                 for g in limits:
                     limit_totals[g] += servings.get(g, 0)
         d += timedelta(days=1)
 
     lines = ['', f'### Средиземноморский вердикт — 7 дней ({start7}..{ref})']
-    if not day_hit_rates:
+    if not days_with_data:
         lines.append('Нет данных')
         return lines
 
-    avg_score = round(sum(day_hit_rates) / len(day_hit_rates) * 100)
-    sym = '✓' if avg_score >= 70 else ('⚠' if avg_score >= 40 else '✗')
-    lines.append(f'Счёт: {sym} {avg_score}% (по {days_with_data} дням)')
+    floors_met = sum(1 for g in floors if floor_totals.get(g, 0) >= GROUP_QUOTA[g][1])
+    score = round(floors_met / len(floors) * 100) if floors else 0
+    sym = '✓' if score >= 70 else ('⚠' if score >= 40 else '✗')
+    lines.append(f'Счёт: {sym} {score}% ({floors_met}/{len(floors)} групп)')
 
-    threshold = days_with_data * 0.7
     gaps = sorted(
-        [(g, floor_days.get(g, 0)) for g in floors if floor_days.get(g, 0) < threshold],
-        key=lambda x: x[1],
+        [(g, floor_totals.get(g, 0), GROUP_QUOTA[g][1])
+         for g in floors if floor_totals.get(g, 0) < GROUP_QUOTA[g][1]],
+        key=lambda x: x[1] / x[2],
     )
     if gaps:
-        parts = [f'{g} ({days_with_data - n}дн не было)' for g, n in gaps]
-        lines.append(f'Пропускали: {", ".join(parts)}')
+        parts = [f'{g} {v:.1f}/{q}' for g, v, q in gaps]
+        lines.append(f'Не добрали: {", ".join(parts)}')
 
     overruns = [(g, limit_totals[g]) for g in limits if limit_totals.get(g, 0) > GROUP_QUOTA[g][1]]
     if overruns:
