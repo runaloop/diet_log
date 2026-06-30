@@ -27,7 +27,7 @@ GROUP_QUOTA = {
     'бобовые': ('floor', 3), 'рыба': ('floor', 5), 'орехи': ('floor', 7),
     'молочка': ('floor', 7), 'яйца': ('floor', 2),
     'птица': ('limit', 4), 'красное_мясо': ('limit', 1),
-    'сладкое': ('limit', 2), 'добавки': ('limit', 7),
+    'обработка': ('limit', 2), 'добавки': ('limit', 20),
 }
 
 # Gram-anchored groups (STRATEGY.md §6a): 1 serving = 100 g of meat/fish as
@@ -37,7 +37,7 @@ GROUP_QUOTA = {
 # event-flag based (weight summed as-is).
 GRAM_GROUPS = {'рыба', 'птица'}
 GROUP_ORDER = ['рыба', 'бобовые', 'овощи', 'фрукты', 'злаки', 'орехи', 'молочка',
-             'яйца', 'птица', 'красное_мясо', 'сладкое', 'добавки']
+             'яйца', 'птица', 'красное_мясо', 'обработка', 'добавки']
 
 GOALS_RE = re.compile(r'Дефицит.*?~?(\d+)-(\d+).*?ккал', re.IGNORECASE)
 GOAL_PROTEIN_RE = re.compile(r'Белок.*?min\s*(\d+)', re.IGNORECASE)
@@ -493,6 +493,102 @@ def group_remainder_lines(week_start: date, ref: date):
     return out
 
 
+def day_med_verdict(ref: date):
+    """Compact Mediterranean verdict for today: score + what was missed."""
+    servings_day, _ = group_servings(ref, ref)
+    if servings_day is None:
+        return ['', '### Средиземноморский вердикт — сегодня', '- diet.db не найден']
+
+    floors = [g for g in GROUP_ORDER if GROUP_QUOTA.get(g, ('', 0))[0] == 'floor']
+    limits = [g for g in GROUP_ORDER if GROUP_QUOTA.get(g, ('', 0))[0] == 'limit']
+
+    hit = [g for g in floors if servings_day.get(g, 0) > 0]
+    missed = [g for g in floors if servings_day.get(g, 0) == 0]
+    score = round(len(hit) / len(floors) * 100) if floors else 0
+    sym = '✓' if score >= 70 else ('⚠' if score >= 40 else '✗')
+
+    lines = ['', '### Средиземноморский вердикт — сегодня']
+    lines.append(f'Счёт: {sym} {score}% ({len(hit)}/{len(floors)} групп)')
+    if missed and score < 80:
+        lines.append(f'Упущено: {", ".join(missed)}')
+
+    limit_notes = []
+    for g in limits:
+        got = servings_day.get(g, 0.0)
+        if got > 0:
+            pct = round(got / GROUP_QUOTA[g][1] * 100)
+            limit_notes.append(f'{g}: {got:.1f} ({pct}% лимита/нед)')
+    if limit_notes:
+        lines.append(f'Лимиты: {"; ".join(limit_notes)}')
+
+    return lines
+
+
+def rolling7_med_verdict(ref: date):
+    """7-day rolling Med score: per-group day counts, chronic gaps, limit totals."""
+    from profile import parse_food_rows
+
+    start7 = ref - timedelta(days=6)
+    catalog = load_catalog_groups()
+    if catalog is None:
+        return ['', f'### Средиземноморский вердикт — 7 дней', '- diet.db не найден']
+
+    floors = [g for g in GROUP_ORDER if GROUP_QUOTA.get(g, ('', 0))[0] == 'floor']
+    limits = [g for g in GROUP_ORDER if GROUP_QUOTA.get(g, ('', 0))[0] == 'limit']
+
+    day_hit_rates = []
+    floor_days = defaultdict(int)
+    limit_totals = defaultdict(float)
+    days_with_data = 0
+
+    d = start7
+    while d <= ref:
+        path = diary_path(d)
+        if path.exists():
+            servings = defaultdict(float)
+            for name, grams, *_ in parse_food_rows(path.read_text().split('\n')):
+                for g, w in catalog.get(name.lower(), []):
+                    if g in GRAM_GROUPS and grams:
+                        servings[g] += grams * w / 100.0
+                    else:
+                        servings[g] += w
+            if servings:
+                days_with_data += 1
+                hit_today = sum(1 for g in floors if servings.get(g, 0) > 0)
+                day_hit_rates.append(hit_today / len(floors) if floors else 0)
+                for g in floors:
+                    if servings.get(g, 0) > 0:
+                        floor_days[g] += 1
+                for g in limits:
+                    limit_totals[g] += servings.get(g, 0)
+        d += timedelta(days=1)
+
+    lines = ['', f'### Средиземноморский вердикт — 7 дней ({start7}..{ref})']
+    if not day_hit_rates:
+        lines.append('Нет данных')
+        return lines
+
+    avg_score = round(sum(day_hit_rates) / len(day_hit_rates) * 100)
+    sym = '✓' if avg_score >= 70 else ('⚠' if avg_score >= 40 else '✗')
+    lines.append(f'Счёт: {sym} {avg_score}% (по {days_with_data} дням)')
+
+    threshold = days_with_data * 0.7
+    gaps = sorted(
+        [(g, floor_days.get(g, 0)) for g in floors if floor_days.get(g, 0) < threshold],
+        key=lambda x: x[1],
+    )
+    if gaps:
+        parts = [f'{g} ({days_with_data - n}дн не было)' for g, n in gaps]
+        lines.append(f'Пропускали: {", ".join(parts)}')
+
+    overruns = [(g, limit_totals[g]) for g in limits if limit_totals.get(g, 0) > GROUP_QUOTA[g][1]]
+    if overruns:
+        o_parts = [f'{g} {v:.1f} (лимит {GROUP_QUOTA[g][1]})' for g, v in overruns]
+        lines.append(f'Лимиты превышены: {", ".join(o_parts)}')
+
+    return lines
+
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -551,7 +647,10 @@ def main():
         fat_sym = '⚠' if target_fat and data['ж'] > target_fat * 1.2 else '✓'
         fat_note = f' (перебор {data["ж"] - target_fat:.0f}г)' if target_fat and data['ж'] > target_fat * 1.2 else ''
         lines.append(f'- Жиры:      {fat_sym} {data["ж"]:.0f}/{target_fat:.0f}г{fat_note}')
-        if deficit_min and deficit_max:
+        if day_phase == 'поддержание':
+            bal_sym = '✓' if abs(deficit) <= 200 else '⚠'
+            lines.append(f'- Баланс:    {bal_sym} {deficit:.0f} ккал (поддержание, цель ~0)')
+        elif deficit_min and deficit_max:
             if deficit < 0:
                 d_sym, d_note = '✗', ' (профицит)'
             elif deficit_min <= deficit <= deficit_max:
@@ -561,6 +660,8 @@ def main():
             else:
                 d_sym, d_note = '✓', f' (выше коридора на {deficit - deficit_max:.0f})'
             lines.append(f'- Дефицит:   {d_sym} {deficit:.0f} ккал (цель {deficit_min}–{deficit_max}){d_note}')
+        lines += day_med_verdict(ref)
+        lines += rolling7_med_verdict(ref)
         print('\n'.join(lines))
         return
     elif cmd == 'weektrend':
