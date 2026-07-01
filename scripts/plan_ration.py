@@ -39,6 +39,8 @@ from paths import DB_PATH, PROFILE_PATH, RATION, diary_path
 # the real size limiter; these stop one group from monopolising the plate.
 PER_GROUP_DAY_CAP = 2
 MAX_DISHES = 7
+MAX_DISH_REPEATS = 2  # a dish may be topped up once (finish the container),
+                      # never scaled into an unrealistic pile
 # A serving must be a real portion, not a condiment/garnish. Dishes whose median
 # portion is below this contribute a phantom group serving — drop them.
 MIN_DISH_KCAL = 30
@@ -47,11 +49,10 @@ MIN_DISH_KCAL = 30
 PROT_TOL = 6          # protein floor considered met within this many grams
 PREP_RANK = {'low': 0, 'med': 1, None: 1.5, 'high': 2}
 
-# Load-week carb layer (STRATEGY.md §9): on a maintenance/load week, carbs are
-# pulled forward around training; on rest days they're moderated and spread.
+# Load-week carb layer (STRATEGY.md §9): on a maintenance/load week, top up
+# carb-forward dishes toward the full daily carb target.
 CARB_TOL = 12
 CARB_TOPUP_CAP = 2
-REST_DAY_CARB_FRAC = 0.6   # untrained load day → moderate carb fill
 
 SUPP_GROUP = 'добавки'
 SUPP_CAP = 1          # at most one supplement/shake in a ration
@@ -96,6 +97,67 @@ def load_catalog():
                                       'prep': None, 'priority': 0})
     con.close()
     return out
+
+
+def load_macros():
+    """name/alias(lower) -> {'name', 'portion_g', 'k', 'b', 'zh', 'u'} straight
+    from the catalog — unlike load_dishes(), covers every product regardless
+    of eating history (needed to pin a dish that's never been a staple)."""
+    con = sqlite3.connect(DB_PATH)
+    out, by_id = {}, {}
+    for pid, name, portion_g, k, b, zh, u in con.execute(
+            'SELECT id, name, portion_g, k, b, zh, u FROM product'):
+        rec = {'name': name, 'portion_g': portion_g, 'k': k, 'b': b, 'zh': zh, 'u': u}
+        out[name.lower()] = rec
+        by_id[pid] = rec
+    for pid, text in con.execute('SELECT product_id, text FROM alias'):
+        rec = by_id.get(pid)
+        if rec:
+            out.setdefault(text.lower(), rec)
+    con.close()
+    return out
+
+
+def find_canonical(name_q, macros):
+    """Resolve a --pin/--exclude name query to its catalog record — exact
+    name/alias match first, substring fallback; exits on miss/ambiguity."""
+    key = name_q.strip().lower()
+    rec = macros.get(key)
+    if rec is not None:
+        return rec
+    cands = {v['name'] for k, v in macros.items() if key in k}
+    if not cands:
+        sys.exit(f'--pin/--exclude: продукт не найден в каталоге: {name_q}')
+    if len(cands) > 1:
+        sys.exit(f'--pin/--exclude: неоднозначно ({", ".join(sorted(cands))}): {name_q}')
+    only = next(iter(cands))
+    return next(v for v in macros.values() if v['name'] == only)
+
+
+def resolve_pin(spec, catalog, macros):
+    """spec = 'Name' or 'Name:grams'. Scale the catalog product to `grams`
+    (or its default portion if omitted) and shape it like a planner dish."""
+    if ':' in spec:
+        name_q, grams_s = spec.rsplit(':', 1)
+        grams = float(grams_s)
+    else:
+        name_q, grams = spec, None
+    rec = find_canonical(name_q, macros)
+    portion_g = rec['portion_g']
+    if grams is None:
+        grams = portion_g or 0.0
+        k, b, zh, u = rec['k'], rec['b'], rec['zh'], rec['u']
+    elif portion_g:
+        f = grams / portion_g
+        k, b, zh, u = rec['k'] * f, rec['b'] * f, rec['zh'] * f, rec['u'] * f
+    else:  # non-scalable "порция" item — grams requested but nothing to scale by
+        k, b, zh, u = rec['k'], rec['b'], rec['zh'], rec['u']
+    cat = catalog.get(rec['name'].lower(), {'groups': [], 'prep': None, 'priority': 0})
+    groups = dict(cat['groups'])
+    return {'name': rec['name'], 'grams': grams, 'count': 0,
+            'k': k, 'b': b, 'zh': zh, 'u': u, 'groups': groups,
+            'prep': cat['prep'], 'priority': cat.get('priority', 0),
+            'supp': SUPP_GROUP in groups}
 
 
 def load_dishes():
@@ -241,21 +303,39 @@ def carb_fill(dishes, target, ration, servings, used, room, kcal_left, eaten, se
         added += 1
 
 
-def protein_topup(dishes, rem_prot, ration, servings, used, room, seed):
+def protein_topup(dishes, rem_prot, ration, servings, used, room, eaten, seed):
     """Daily-hard protein floor (STRATEGY.md §8): whole food first, supplements
     capped — kcal ceiling may be overshot, protein wins over exactness."""
     supp_used = sum(1 for d in ration if d['supp'])
     while rem_prot > PROT_TOL:
+        repeat_count = defaultdict(int)
+        for r in ration:
+            repeat_count[r['name']] += 1
+        # a dish may be topped up once (finish the container) — capped by
+        # MAX_DISH_REPEATS so this can't spiral into an absurd gram pile.
         cands = [d for d in dishes
-                 if d['name'] not in used and d['b'] > 0
+                 if repeat_count[d['name']] < MAX_DISH_REPEATS and d['b'] > 0
                  and fits_limits(d, room)
                  and not (d['supp'] and supp_used >= SUPP_CAP)]
         if not cands:
             break
-        # whole food before supplements; higher priority first; then cheapest
-        # kcal per gram of protein
-        cands.sort(key=lambda d: (d['supp'], -d['priority'], d['k'] / d['b'],
-                                  (d['count'] + seed) % 5))
+        def overlap(d):  # a NEW dish sharing a group with something already
+            # committed (e.g. a second, different canned-bean product) is
+            # penalized; reopening that same dish again is not.
+            return sum(1 for r in ration if r['name'] != d['name']
+                       and r['groups'].keys() & d['groups'].keys())
+        # fresh (not eaten this week) before repeats; whole food before
+        # supplements; higher priority; don't open a new dish in an
+        # already-active group when reopening the same one would do; least
+        # overshoot past what's still needed (a 76g-protein dish for a 10g
+        # gap blows way past the floor) — only then cheapest kcal per gram of
+        # protein among equally tight fits; otherwise the single cheapest
+        # protein source (jerky-style concentrates) wins every day regardless
+        # of repetition.
+        cands.sort(key=lambda d: (d['name'].lower() in eaten, d['supp'],
+                                  -d['priority'], overlap(d),
+                                  max(0.0, d['b'] - rem_prot),
+                                  d['k'] / d['b'], (d['count'] + seed) % 5))
         d = cands[0]
         commit(d, ration, servings, used, defaultdict(int))
         supp_used += d['supp']
@@ -263,13 +343,29 @@ def protein_topup(dishes, rem_prot, ration, servings, used, room, seed):
     return rem_prot
 
 
-def build(plan, dishes, servings, eaten, seed, cphase):
+def build(plan, dishes, servings, eaten, seed, cphase, pins=None, exclude=None):
+    exclude_names = {e.lower() for e in (exclude or [])}
+    dishes = [d for d in dishes if d['name'].lower() not in exclude_names]
+
     servings = defaultdict(float, servings)
     room = limit_headroom(servings)
     used = set()
     group_count = defaultdict(int)
+    group_pick = {}  # group -> dish already opened for it today; finish that
+                      # container (2nd serving of the same thing) before
+                      # cracking open a different one for the same group.
     ration = []
     kcal_left = plan['kcal']
+
+    # Pins are guaranteed dishes (user-committed, e.g. "must eat this today")
+    # — locked in first, then the debt/floor/carb fill optimizes the rest of
+    # the day around them, same as any other committed dish.
+    for d in (pins or []):
+        commit(d, ration, servings, used, group_count)
+        for g in d['groups']:
+            group_pick.setdefault(g, d)
+        kcal_left -= d['k']
+        room = limit_headroom(servings)
 
     while len(ration) < MAX_DISHES:
         targets = [g for g in behind_floors(servings)
@@ -278,10 +374,15 @@ def build(plan, dishes, servings, eaten, seed, cphase):
             break
         progressed = False
         for g in targets:
-            d = pick_for_group(g, dishes, used, room, kcal_left, eaten, seed)
+            prior = group_pick.get(g)
+            if prior is not None and prior['k'] <= kcal_left and fits_limits(prior, room):
+                d = prior
+            else:
+                d = pick_for_group(g, dishes, used, room, kcal_left, eaten, seed)
             if d is None:
                 continue
             commit(d, ration, servings, used, group_count)
+            group_pick[g] = d
             kcal_left -= d['k']
             room = limit_headroom(servings)
             progressed = True
@@ -292,16 +393,30 @@ def build(plan, dishes, servings, eaten, seed, cphase):
     floor = protein_floor(cphase)
     rem_prot = max(0.0, floor - plan['prot_eaten']
                    - sum(d['b'] for d in ration))
-    protein_topup(dishes, rem_prot, ration, servings, used, room, seed)
+    protein_topup(dishes, rem_prot, ration, servings, used, room, eaten, seed)
 
-    # Load-week carb layer (§9): carbs forward around training, moderated on rest.
+    # Load-week carb layer (§9): top up carbs to the full daily target.
     if cphase == 'поддержание':
-        trained = plan['spent'] > 0
-        frac = 1.0 if trained else REST_DAY_CARB_FRAC
         kcal_left = plan['kcal'] - sum(d['k'] for d in ration)
-        carb_fill(dishes, plan['carb_rem'] * frac, ration, servings, used,
+        carb_fill(dishes, plan['carb_rem'], ration, servings, used,
                   room, kcal_left, eaten, seed)
-    return ration, floor
+    return merge_repeats(ration), floor
+
+
+def merge_repeats(ration):
+    """Collapse repeated picks of the same dish into one row with combined
+    grams — 2x110g of the same can reads as 220g, not two identical lines."""
+    merged, index = [], {}
+    for d in ration:
+        i = index.get(d['name'])
+        if i is None:
+            index[d['name']] = len(merged)
+            merged.append(dict(d))
+        else:
+            m = merged[i]
+            for f in ('grams', 'k', 'b', 'zh', 'u'):
+                m[f] += d[f]
+    return merged
 
 
 def _phase_key(phase):
@@ -310,14 +425,8 @@ def _phase_key(phase):
 
 def render(plan, ration, floor, servings, cphase):
     phase = plan['phase']
-    load = cphase == 'поддержание'
-    trained = plan['spent'] > 0
     print(f"Фаза: {phase} | потолок ккал: {plan['kcal']:.0f} | "
           f"белок-флор: {floor:.0f}г (съедено {plan['prot_eaten']:.0f})")
-    if load:
-        hint = ('тренировка была — угли вокруг неё' if trained
-                else 'до трени умеренно, основная загрузка вокруг тренировки')
-        print(f"Загрузка: {hint}, остальное размазать по дню.")
 
     behind = behind_floors(defaultdict(float, servings))
     if behind:
@@ -335,20 +444,16 @@ def render(plan, ration, floor, servings, cphase):
             print('Добор не нужен — недельные группы и белок в норме.')
         return
 
-    when = ' Когда |' if load else ''
-    when_sep = f"{'-'*8}|" if load else ''
-    print(f"| {'Блюдо':<30} | {'К':>4} | {'Б':>3} | {'Ж':>3} | {'У':>3} |{when} Группы")
-    print(f"|{'-'*32}|{'-'*6}|{'-'*5}|{'-'*5}|{'-'*5}|{when_sep}{'-'*7}")
+    print(f"| {'Блюдо':<30} | {'К':>4} | {'Б':>3} | {'Ж':>3} | {'У':>3} | Группы")
+    print(f"|{'-'*32}|{'-'*6}|{'-'*5}|{'-'*5}|{'-'*5}|{'-'*7}")
     tk = tb = tz = tu = 0.0
     for d in ration:
         gr = ', '.join(f'{g}' for g in d['groups'])
         label = f"{d['name']} {d['grams']:.0f}г"
-        wcol = f" {'трен' if is_carb_forward(d) else 'день':<6} |" if load else ''
         print(f"| {label:<30} | {d['k']:>4.0f} | {d['b']:>3.0f} | "
-              f"{d['zh']:>3.0f} | {d['u']:>3.0f} |{wcol} {gr}")
+              f"{d['zh']:>3.0f} | {d['u']:>3.0f} | {gr}")
         tk += d['k']; tb += d['b']; tz += d['zh']; tu += d['u']
-    pad = f"{'':>8}|" if load else ''
-    print(f"| {'ИТОГО':<30} | {tk:>4.0f} | {tb:>3.0f} | {tz:>3.0f} | {tu:>3.0f} |{pad}")
+    print(f"| {'ИТОГО':<30} | {tk:>4.0f} | {tb:>3.0f} | {tz:>3.0f} | {tu:>3.0f} |")
 
     day_prot = plan['prot_eaten'] + tb
     p_sym = '✓' if day_prot >= floor - PROT_TOL else '⚠'
@@ -367,10 +472,14 @@ def render_ration_md(ref, ration):
     out = [f'# Рекомендуемый рацион {ref.isoformat()}', '',
            '| · | Блюдо | К | Б | Ж | У | Съедено |',
            '| --- | --- | --- | --- | --- | --- | --- |']
+    tk = tb = tz = tu = 0.0
     for d in ration:
         label = f"{d['name']} {d['grams']:.0f}г"
         out.append(f"| 🔲 | {label} | {d['k']:.0f} | {d['b']:.0f} | "
                    f"{d['zh']:.0f} | {d['u']:.0f} | |")
+        tk += d['k']; tb += d['b']; tz += d['zh']; tu += d['u']
+    out.append(f"| — | **ИТОГО** | **{tk:.0f}** | **{tb:.0f}** | "
+               f"**{tz:.0f}** | **{tu:.0f}** | |")
     return '\n'.join(out) + '\n'
 
 
@@ -407,10 +516,24 @@ def diary_date(arg):
 
 
 if __name__ == '__main__':
-    pos = [a for a in sys.argv[1:] if not a.startswith('--')]
-    flags = {a for a in sys.argv[1:] if a.startswith('--')}
+    argv = sys.argv[1:]
+    pos, pin_specs, exclude_specs, flags = [], [], [], set()
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ('--pin', '--exclude'):
+            i += 1
+            if i >= len(argv):
+                sys.exit(f'{a}: требуется значение "Название[:граммы]"')
+            (pin_specs if a == '--pin' else exclude_specs).append(argv[i])
+        elif a.startswith('--'):
+            flags.add(a)
+        else:
+            pos.append(a)
+        i += 1
     if len(pos) != 1:
-        print(f'Usage: {sys.argv[0]} <diary.md> [--write]')
+        print(f'Usage: {sys.argv[0]} <diary.md> '
+              '[--pin "Name[:grams]"]... [--exclude "Name"]... [--write] [--force]')
         sys.exit(1)
     diary_arg = pos[0]
     text = Path(diary_arg).read_text(encoding='utf-8')
@@ -418,17 +541,23 @@ if __name__ == '__main__':
     week_start, _ = week_range(ref)
     plan = parse_plan(text)
     dishes = load_dishes()
+    catalog = load_catalog()
+    macros = load_macros()
+    pins = [resolve_pin(spec, catalog, macros) for spec in pin_specs]
+    exclude = [find_canonical(spec, macros)['name'] for spec in exclude_specs]
     servings, _ = group_servings(week_start, ref)
     servings = servings or {}
     eaten = eaten_this_week(week_start, ref)
     seed = date_seed(diary_arg)
     cphase = cycle_phase(week_start)
-    ration, floor = build(plan, dishes, dict(servings), eaten, seed, cphase)
+    ration, floor = build(plan, dishes, dict(servings), eaten, seed, cphase,
+                           pins=pins, exclude=exclude)
     # --write: ensure ration.md exists for this day (base plan, no leftovers).
-    # Never clobber a current-day file — that would wipe checkmarks/leftovers.
+    # Never clobber a current-day file — that would wipe checkmarks/leftovers,
+    # unless --force (explicit "regenerate anyway", e.g. after --pin/--exclude).
     if '--write' in flags:
-        if ration_is_current(ref):
-            print(f'ration.md уже на {ref} — не трогаю.')
+        if ration_is_current(ref) and '--force' not in flags:
+            print(f'ration.md уже на {ref} — не трогаю (--force чтобы перезаписать).')
         elif not ration:
             print('Добор не нужен — ration.md не создаю.')
         else:

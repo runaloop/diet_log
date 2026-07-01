@@ -38,9 +38,11 @@ def sort_file(path):
             i += 1
 
         header, data = block[:2], block[2:]  # title row + separator stay on top
-        unchecked = [r for r in data if '✅' not in parse_cells(r)[0]]
-        checked = [r for r in data if '✅' in parse_cells(r)[0]]
-        out.extend(header + unchecked + checked)
+        total = [r for r in data if parse_cells(r)[0] == '—']  # ИТОГО row: always last
+        rows = [r for r in data if parse_cells(r)[0] != '—']
+        unchecked = [r for r in rows if '✅' not in parse_cells(r)[0]]
+        checked = [r for r in rows if '✅' in parse_cells(r)[0]]
+        out.extend(header + unchecked + checked + total)
         done = True  # only sort the first table
 
     result = '\n'.join(out)
