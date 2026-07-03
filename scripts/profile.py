@@ -14,12 +14,13 @@ Usage:
 """
 import json
 import re
+import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
 from statistics import median
 
-from paths import DIARIES, PROFILE_PATH
+from paths import DB_PATH, DIARIES, PROFILE_PATH
 
 STAPLE_MIN_COUNT = 5  # appears on >=5 days → staple, else rare
 
@@ -93,7 +94,27 @@ def parse_food_rows(lines):
         yield name, grams, k, g('Б', 3), g('Ж', 4), g('У', 5)
 
 
+def load_canon():
+    """Diary spelling (lower) -> canonical catalog name, via product+alias.
+
+    Diary rows aren't always canonical ('Салат … 1 порция', old spellings) —
+    without folding them one dish smears into phantom variants with split
+    counts and bogus medians."""
+    if not DB_PATH.exists():
+        return {}
+    con = sqlite3.connect(DB_PATH)
+    by_id = dict(con.execute('SELECT id, name FROM product'))
+    out = {n.lower(): n for n in by_id.values()}
+    for pid, text in con.execute('SELECT product_id, text FROM alias'):
+        n = by_id.get(pid)
+        if n:
+            out.setdefault(text.lower(), n)
+    con.close()
+    return out
+
+
 def build_profile():
+    canon = load_canon()
     dishes = defaultdict(lambda: {
         'name': None, 'days': set(), 'grams': [],
         'k': [], 'b': [], 'zh': [], 'u': [],
@@ -102,6 +123,7 @@ def build_profile():
         day = path.stem
         lines = path.read_text(encoding='utf-8').split('\n')
         for name, grams, k, b, zh, u in parse_food_rows(lines):
+            name = canon.get(name.lower(), name)
             key = name.lower()
             d = dishes[key]
             d['name'] = d['name'] or name

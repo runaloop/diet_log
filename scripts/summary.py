@@ -120,6 +120,23 @@ def protein_floor(phase=None, goals=None):
     return round(lw[1] * factor)
 
 
+# Daily fat cap, g per kg body weight — phase-independent (STRATEGY.md §7):
+# fat is a top-side budget, not a target; carbs get whatever kcal it frees.
+FAT_PER_KG = 0.8
+
+
+def fat_cap(goals=None):
+    """Daily fat cap in grams: 0.8 g/kg body weight (STRATEGY.md §7).
+
+    Weight comes from the latest user.md entry; falls back to the goals.md
+    range average when no weight is on record.
+    """
+    lw = load_last_weight()
+    if lw is None:
+        return (goals or load_goals()).get('fat', 0)
+    return round(lw[1] * FAT_PER_KG)
+
+
 def phase_deficit_target(phase, goals):
     if phase == 'поддержание':
         return 0
@@ -402,7 +419,7 @@ def weektrend(ref: date, with_groups: bool = True):
 
     if with_groups:
         lines.append('')
-        lines += group_remainder_lines(week_start, ref)
+        lines += group_remainder_lines(ref)
     return '\n'.join(lines)
 
 
@@ -458,17 +475,22 @@ def group_servings(start: date, end: date):
     return servings, unmatched
 
 
-def group_remainder_lines(week_start: date, ref: date):
-    """Food-group week remainder as markdown lines (no header): floor groups to
-    top up, limit groups' headroom. Folded into weektrend."""
-    servings, unmatched = group_servings(week_start, ref)
+def group_remainder_lines(ref: date):
+    """Food-group remainder as markdown lines (no header): floor groups to
+    top up, limit groups' headroom. Folded into weektrend.
+
+    Groups roll over a 7-day window ending at `ref` (not the ISO week): limit
+    overruns aren't amnestied at Monday midnight and floor debt doesn't burn.
+    The ISO frame stays only for the phase cycle / deficit trend."""
+    win_start = ref - timedelta(days=6)
+    servings, unmatched = group_servings(win_start, ref)
     if servings is None:
         return ['- data/diet.db не найден — остаток групп недоступен']
 
     floors = [g for g in GROUP_ORDER if GROUP_QUOTA.get(g, ('', 0))[0] == 'floor']
     limits = [g for g in GROUP_ORDER if GROUP_QUOTA.get(g, ('', 0))[0] == 'limit']
 
-    out = ['### Остаток групп — добрать']
+    out = [f'### Остаток групп (7 дней {win_start}..{ref}) — добрать']
     for g in floors:
         quota = GROUP_QUOTA[g][1]
         got = servings.get(g, 0.0)
@@ -631,7 +653,7 @@ def main():
             else:
                 c_sym, c_note = '✓', ''
             lines.append(f'- Углеводы:  {c_sym} {data["у"]:.0f}/{у_цель:.0f}г{c_note}')
-        target_fat = goals.get('fat', 0)
+        target_fat = fat_cap(goals)
         fat_sym = '⚠' if target_fat and data['ж'] > target_fat * 1.2 else '✓'
         fat_note = f' (перебор {data["ж"] - target_fat:.0f}г)' if target_fat and data['ж'] > target_fat * 1.2 else ''
         lines.append(f'- Жиры:      {fat_sym} {data["ж"]:.0f}/{target_fat:.0f}г{fat_note}')

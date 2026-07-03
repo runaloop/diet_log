@@ -166,21 +166,23 @@ def cmd_migrate(con, args):
 
 def cmd_add(con, args):
     portion_raw, portion_g = parse_portion(args.port)
+    avail = parse_avail(args.avail) if args.avail else None
     cur = con.execute(
         """INSERT INTO product(name, portion_raw, portion_g, k, b, zh, u, fiber,
-                               prep_effort, estimated, fat_quality, priority)
-           VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?,'neutral'),COALESCE(?,0))
+                               prep_effort, estimated, fat_quality, priority, avail)
+           VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?,'neutral'),COALESCE(?,0),?)
            ON CONFLICT(name) DO UPDATE SET
              portion_raw=excluded.portion_raw, portion_g=excluded.portion_g,
              k=excluded.k, b=excluded.b, zh=excluded.zh, u=excluded.u,
              fiber=excluded.fiber, prep_effort=excluded.prep_effort,
              estimated=excluded.estimated,
              fat_quality=COALESCE(?, product.fat_quality),
-             priority=COALESCE(?, product.priority)
+             priority=COALESCE(?, product.priority),
+             avail=COALESCE(?, product.avail)
            RETURNING id""",
         (args.name, portion_raw, portion_g, args.k, args.b, args.zh, args.u,
          args.fiber, args.prep, int(args.estimate), args.fat_quality,
-         args.priority, args.fat_quality, args.priority))
+         args.priority, avail, args.fat_quality, args.priority, avail))
     pid = cur.fetchone()[0]
     if args.alias:
         for a in (x.strip() for x in args.alias.split(',')):
@@ -195,15 +197,16 @@ def cmd_find(con, args):
     like = f'%{args.substr.lower()}%'
     rows = con.execute(
         """SELECT DISTINCT p.name, p.portion_raw, p.k, p.b, p.zh, p.u, p.fiber,
-                  p.fat_quality
+                  p.fat_quality, p.avail
            FROM product p LEFT JOIN alias a ON a.product_id = p.id
            WHERE ulower(p.name) LIKE ? OR ulower(a.text) LIKE ?
            ORDER BY p.name""", (like, like)).fetchall()
     if not rows:
         print('— ничего —')
         return
-    for name, port, k, b, zh, u, fib, fq in rows:
+    for name, port, k, b, zh, u, fib, fq, av in rows:
         tag = '' if fq == 'neutral' else f' жир:{fq}'
+        tag += f' · {av}' if av else ''
         print(f'{name} [{port}] К{k} Б{b} Ж{zh} У{u} Клет{fib}{tag}')
 
 
@@ -247,6 +250,42 @@ def cmd_priority(con, args):
         sys.exit(f'priority: продукт не найден: {args.name}')
     con.commit()
     print(f'{args.name}: priority={args.level}')
+
+
+def parse_avail(v):
+    """always|stock|none|resto:<имя> -> stored value (None clears)."""
+    if v == 'none':
+        return None
+    if v in ('always', 'stock') or (v.startswith('resto:') and len(v) > 6):
+        return v
+    sys.exit(f'avail: ожидается always|stock|none|resto:<имя>, получено {v!r}')
+
+
+def resolve_product(con, name_q):
+    """Exact name match, else unique substring over name+alias."""
+    row = con.execute('SELECT id, name FROM product WHERE name = ?',
+                      (name_q,)).fetchone()
+    if row:
+        return row
+    like = f'%{name_q.lower()}%'
+    rows = con.execute(
+        """SELECT DISTINCT p.id, p.name FROM product p
+           LEFT JOIN alias a ON a.product_id = p.id
+           WHERE ulower(p.name) LIKE ? OR ulower(a.text) LIKE ?""",
+        (like, like)).fetchall()
+    if not rows:
+        sys.exit(f'продукт не найден: {name_q}')
+    if len(rows) > 1:
+        sys.exit('неоднозначно: ' + ', '.join(sorted(n for _, n in rows)))
+    return rows[0]
+
+
+def cmd_avail(con, args):
+    pid, name = resolve_product(con, args.name)
+    val = parse_avail(args.value)
+    con.execute('UPDATE product SET avail = ? WHERE id = ?', (val, pid))
+    con.commit()
+    print(f'{name}: avail={val or "—"}')
 
 
 def cmd_rename(con, args):
@@ -300,6 +339,7 @@ def main():
                    choices=['good', 'neutral', 'bad'])
     a.add_argument('--priority', type=int,
                    help='planner priority (0 default, <0 demote, >0 prefer)')
+    a.add_argument('--avail', help='always|stock|none|resto:<имя>')
 
     f = sub.add_parser('find')
     f.add_argument('substr')
@@ -315,6 +355,10 @@ def main():
     pr.add_argument('name')
     pr.add_argument('level', type=int)
 
+    av = sub.add_parser('avail')
+    av.add_argument('name')
+    av.add_argument('value', help='always|stock|none|resto:<имя>')
+
     rn = sub.add_parser('rename')
     rn.add_argument('old')
     rn.add_argument('new')
@@ -327,8 +371,8 @@ def main():
     args = p.parse_args()
     con = connect()
     {'init': cmd_init, 'migrate': cmd_migrate, 'add': cmd_add, 'find': cmd_find,
-     'q': cmd_q, 'tag': cmd_tag, 'priority': cmd_priority, 'rename': cmd_rename,
-     'review': cmd_review}[args.cmd](con, args)
+     'q': cmd_q, 'tag': cmd_tag, 'priority': cmd_priority, 'avail': cmd_avail,
+     'rename': cmd_rename, 'review': cmd_review}[args.cmd](con, args)
     con.close()
 
 
