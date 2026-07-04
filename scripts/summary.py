@@ -92,32 +92,31 @@ def load_cycle():
     return result
 
 
-def cycle_phase(week_start: date, cycle=None):
-    """Return 'поддержание' or 'дефицит' for the ISO week starting at week_start."""
-    cycle = cycle or load_cycle()
-    if cycle.get('mode') == 'поддержание' or cycle.get('anchor') is None:
-        return 'поддержание'
-    anchor = cycle['anchor'] - timedelta(days=cycle['anchor'].weekday())
-    idx = ((week_start - anchor).days // 7) % cycle['cycle_len']
-    return 'поддержание' if idx == cycle['maintenance_idx'] else 'дефицит'
+def global_mode(cycle=None):
+    """'похудение' | 'поддержание' from config/cycle.md.
+
+    Week-level 2+1 cycling is retired (STRATEGY.md §7a) — deficit now
+    periodizes per day by training load; a diet break is simply switching
+    the mode to 'поддержание'.
+    """
+    return (cycle or load_cycle())['mode']
 
 
-# Daily protein floor, g per kg body weight, by week phase (STRATEGY.md §8).
-PROTEIN_PER_KG = {'дефицит': 2.0, 'поддержание': 1.8}
+# Daily protein floor, g per kg body weight (STRATEGY.md §8). Flat 1.8 for
+# the day-periodization trial — raise if holding muscle gets hard.
+PROTEIN_PER_KG = 1.8
 
 
-def protein_floor(phase=None, goals=None):
-    """Daily protein floor in grams: weight × phase factor (STRATEGY.md §8).
+def protein_floor(goals=None):
+    """Daily protein floor in grams: weight × 1.8 (STRATEGY.md §8).
 
     Weight comes from the latest user.md entry; falls back to the fixed
-    goals.md value when no weight is on record. phase=None (month/range, mixed
-    phases) uses a blended factor.
+    goals.md value when no weight is on record.
     """
     lw = load_last_weight()
     if lw is None:
         return (goals or load_goals()).get('protein', 0)
-    factor = PROTEIN_PER_KG.get(phase, 1.9)
-    return round(lw[1] * factor)
+    return round(lw[1] * PROTEIN_PER_KG)
 
 
 # Daily fat safe range, g per kg body weight, cycled by the day's training
@@ -163,18 +162,16 @@ HIGH_LOAD_RE = re.compile(r'силов|интервал', re.IGNORECASE)
 LOAD_IGNORE_RE = re.compile(r'прочая активность|прогулк|ходьб', re.IGNORECASE)
 
 
-def day_load(ref: date):
-    """Classify the day's training load for the fat range (STRATEGY.md §7).
+CARRYOVER_KCAL = 900  # yesterday's Z3+ kcal above this → today at least mid
 
-    'high' — ≥300 kcal in Z3+/strength/intervals; 'mid' — ≥300 kcal of
-    training counting Z2 and unknown-zone workouts (the agent asks the zone
-    anyway for carb compensation); 'low' — rest, walks, NEAT only.
-    """
+
+def _day_signals(ref: date):
+    """(raw_load, hi_kcal) for the diary of `ref`, no carryover applied."""
     from profile import parse_activity_rows
 
     path = diary_path(ref)
     if not path.exists():
-        return 'low'
+        return 'low', 0.0
     hi = mid = 0.0
     for name, kcal in parse_activity_rows(path.read_text().split('\n')):
         if LOAD_IGNORE_RE.search(name):
@@ -186,18 +183,46 @@ def day_load(ref: date):
         elif zone is None or zone == 2:
             mid += kcal
     if hi >= DAY_LOAD_KCAL:
-        return 'high'
+        return 'high', hi
     if hi + mid >= DAY_LOAD_KCAL:
-        return 'mid'
-    return 'low'
+        return 'mid', hi
+    return 'low', hi
 
 
-def phase_deficit_target(phase, goals):
-    if phase == 'поддержание':
-        return 0
-    dmin = goals.get('deficit_min', 0)
-    dmax = goals.get('deficit_max', 0)
-    return (dmin + dmax) / 2 if (dmin or dmax) else 0
+def day_load(ref: date):
+    """Classify the day's training load (STRATEGY.md §7/§7a).
+
+    'high' — ≥300 kcal in Z3+/strength/intervals; 'mid' — ≥300 kcal of
+    training counting Z2 and unknown-zone workouts (the agent asks the zone
+    anyway); 'low' — rest, walks, NEAT only. A rest day after >900 kcal of
+    Z3+ work is bumped to 'mid' (recovery carryover) — for the whole day:
+    fat range and deficit window alike.
+    """
+    load, _ = _day_signals(ref)
+    if load == 'low':
+        _, hi_prev = _day_signals(ref - timedelta(days=1))
+        if hi_prev > CARRYOVER_KCAL:
+            return 'mid'
+    return load
+
+
+# Daily target-deficit window by day load (STRATEGY.md §7a): the deficit
+# lives on easy days, training days are fueled. 'low' reads config/goals.md.
+DAY_DEFICIT_WINDOW = {'mid': (0, 150), 'high': (-150, 150)}
+MAINT_DEFICIT_WINDOW = (-150, 150)
+
+
+def day_deficit_window(load, goals=None, mode=None):
+    """(min, max) kcal target deficit for a day of the given load.
+
+    Maintenance mode → ~0 for every day (a diet break is just this mode).
+    """
+    if (mode or global_mode()) == 'поддержание':
+        return MAINT_DEFICIT_WINDOW
+    if load == 'low':
+        g = goals or load_goals()
+        return g.get('deficit_min', 300), g.get('deficit_max', 500)
+    return DAY_DEFICIT_WINDOW[load]
 
 
 def status(actual, target, invert=False):
@@ -274,6 +299,11 @@ def summarize(start: date, end: date):
     days_total = (end - start).days + 1
     missing, no_data = [], []
     rows = []
+    goals = load_goals()
+    mode = global_mode()
+    # Per-day deficit-target window summed over data days (STRATEGY.md §7a):
+    # the period target is the mix of its days' windows, not one flat number.
+    target_min = target_max = 0.0
 
     d = start
     while d <= end:
@@ -284,6 +314,9 @@ def summarize(start: date, end: date):
             no_data.append(d.isoformat())
         else:
             rows.append(data)
+            lo, hi = day_deficit_window(day_load(d), goals, mode)
+            target_min += lo
+            target_max += hi
         d += timedelta(days=1)
 
     n = len(rows)
@@ -307,26 +340,24 @@ def summarize(start: date, end: date):
         б=total('б'), ж=total('ж'), у=total('у'), клет=total('клет'),
         avg_б=avg('б'), avg_ж=avg('ж'), avg_у=avg('у'), avg_клет=avg('клет'),
         у_цель=total('у_цель'),
+        цель_min=target_min, цель_max=target_max,
         weights=weights,
     )
 
 
-def fmt(r, label, phase=None):
+def fmt(r, label, show_week=False):
     goals = load_goals()
-    deficit_min = goals.get('deficit_min', 0)
-    deficit_max = goals.get('deficit_max', 0)
-    target_protein = protein_floor(phase, goals)
-    weight_loss_mode = deficit_min > 0 or deficit_max > 0
-    if phase == 'поддержание':
-        weight_loss_mode = False
+    mode = global_mode()
+    target_protein = protein_floor(goals)
+    weight_loss_mode = mode == 'похудение'
 
     lines = [
         f'## {label} {r["start"]}..{r["end"]}',
         '',
     ]
-    if phase:
+    if show_week:
         lines.append(f'- Неделя года: {iso_week_label(r["start"])}')
-        lines.append(f'- Фаза цикла: {phase}')
+        lines.append(f'- Режим: {mode}')
     lines += [
         f'- Покрытие: {r["n"]}/{r["days_total"]} дней ({r["coverage"]:.1f}%) | Статус: {r["status"]}',
         f'- Дней без данных: {len(r["no_data"])}',
@@ -350,17 +381,23 @@ def fmt(r, label, phase=None):
         if r['status'] != 'недостаточно данных':
             lines.append('')
             lines.append('### Статус целей (среднее/день)')
+            # Deficit target = the mix of the period's day windows (§7a):
+            # rest days carry the deficit, training days are fueled.
+            lo, hi = r['цель_min'] / r['n'], r['цель_max'] / r['n']
+            avg_d = r['avg_дефицит']
             if weight_loss_mode:
-                avg_d = r['avg_дефицит']
                 if avg_d < 0:
                     d_sym, d_note = '✗', ' (профицит)'
-                elif deficit_min <= avg_d <= deficit_max:
+                elif avg_d < lo:
+                    d_sym, d_note = '⚠', f' (переедание: ниже окна на {lo - avg_d:.0f})'
+                elif avg_d <= hi:
                     d_sym, d_note = '✓', ''
-                elif avg_d < deficit_min:
-                    d_sym, d_note = '⚠', f' (перебор {deficit_min - avg_d:.0f})'
                 else:
-                    d_sym, d_note = '⚠', f' (выше коридора на {avg_d - deficit_max:.0f})'
-                lines.append(f'- Дефицит:  {d_sym} {avg_d:.0f} ккал/день (цель {deficit_min}–{deficit_max}){d_note}')
+                    d_sym, d_note = '⚠', f' (недоедание в тренировочные дни: выше окна на {avg_d - hi:.0f})'
+                lines.append(f'- Дефицит:  {d_sym} {avg_d:.0f} ккал/день (цель по миксу дней {lo:.0f}–{hi:.0f}){d_note}')
+            else:
+                b_sym = '✓' if lo <= avg_d <= hi else '⚠'
+                lines.append(f'- Баланс:   {b_sym} {avg_d:.0f} ккал/день (поддержание, цель ~0)')
             if target_protein:
                 p_sym = status(r['avg_б'], target_protein)
                 p_note = f' (недобор {target_protein - r["avg_б"]:.0f}г)' if r['avg_б'] < target_protein else ''
@@ -438,15 +475,13 @@ def weektrend(ref: date, with_groups: bool = True):
     is always `summary.py weektrend`.
     """
     week_start, week_end = week_range(ref)
-    cycle = load_cycle()
-    phase = cycle_phase(week_start, cycle)
+    mode = global_mode()
     goals = load_goals()
-    target_protein = protein_floor(phase, goals)
-    daily_target = phase_deficit_target(phase, goals)
+    target_protein = protein_floor(goals)
 
     lines = [
         f'# {ref.day:02d}-{ref.month:02d}-{iso_week_label(week_start)} '
-        f'({week_start}..{week_end}) | Фаза цикла: {phase}',
+        f'({week_start}..{week_end}) | Режим: {mode}',
         '',
     ]
 
@@ -461,12 +496,14 @@ def weektrend(ref: date, with_groups: bool = True):
             avg_def = r['avg_дефицит']
             avg_prot = r['avg_б']
             projected = avg_def * 7
-            weekly_target = daily_target * 7
-            if phase == 'поддержание':
+            # Target = the mix of the week's day windows so far (§7a).
+            lo, hi = r['цель_min'] / r['n'], r['цель_max'] / r['n']
+            if mode == 'поддержание':
                 bal_label = 'дефицит' if avg_def >= 0 else 'профицит'
                 lines.append(f'- Средний суточный {bal_label}: {abs(avg_def):.0f} ккал (поддержание, цель ~0)')
             else:
-                lines.append(f'- Средний суточный дефицит: {avg_def:.0f} ккал (цель фазы {daily_target:.0f})')
+                d_sym = '✓' if lo <= avg_def <= hi else ('✗' if avg_def < 0 else '⚠')
+                lines.append(f'- Средний суточный дефицит: {avg_def:.0f} ккал (цель по миксу дней {lo:.0f}–{hi:.0f}) {d_sym}')
             if target_protein and avg_prot < target_protein:
                 lines.append(f'- Белок: {avg_prot:.0f}г/день (цель {target_protein}) ⚠ недобор {target_protein - avg_prot:.0f}г/день')
             # Fat line only when the weekly average leaves the full band —
@@ -478,13 +515,14 @@ def weektrend(ref: date, with_groups: bool = True):
                 lines.append(f'- Жиры: {avg_fat:.0f}г/день ⚠ выше диапазона {ffloor}–{fcap}г (перебор {avg_fat - fcap:.0f}г/день)')
             elif ffloor and avg_fat < ffloor:
                 lines.append(f'- Жиры: {avg_fat:.0f}г/день ⚠ ниже диапазона {ffloor}–{fcap}г — добрать хорошим жиром')
-            if phase == 'поддержание':
+            if mode == 'поддержание':
                 sym = '✓' if abs(projected) <= 700 else '⚠'
                 proj_label = 'дефицита' if projected >= 0 else 'профицита'
                 lines.append(f'- Прогноз недельного {proj_label} при тренде: {abs(projected):.0f} ккал (поддержание) {sym}')
             else:
-                sym = status(projected, weekly_target, invert=True)
-                lines.append(f'- Прогноз недельного дефицита при тренде: {projected:.0f} ккал (цель {weekly_target:.0f}) {sym}')
+                wlo, whi = lo * 7, hi * 7
+                sym = '✓' if wlo <= projected <= whi else ('✗' if projected < 0 else '⚠')
+                lines.append(f'- Прогноз недельного дефицита при тренде: {projected:.0f} ккал (окно {wlo:.0f}–{whi:.0f}) {sym}')
 
     if with_groups:
         lines.append('')
@@ -748,7 +786,7 @@ def main():
     flags = [a for a in args[1:] if a.startswith('--')]
     pos = [a for a in args[1:] if not a.startswith('--')]
     ref = date.fromisoformat(pos[0]) if pos else date.today()
-    phase = None
+    show_week = False
 
     if cmd == 'day':
         ref = date.fromisoformat(args[1]) if len(args) > 1 else date.today()
@@ -760,10 +798,8 @@ def main():
             print(f'Дневник за {ref} есть, но записей нет')
             sys.exit(1)
         goals = load_goals()
-        deficit_min = goals.get('deficit_min', 0)
-        deficit_max = goals.get('deficit_max', 0)
-        day_phase = cycle_phase(week_range(ref)[0])
-        target_protein = protein_floor(day_phase, goals)
+        mode = global_mode()
+        target_protein = protein_floor(goals)
         deficit = data.get('дефицит', 0)
         projected = deficit / 7700
         lines = [
@@ -802,19 +838,21 @@ def main():
             fat_sym, fat_note = '✓', ''
         lines.append(f'- Жиры:      {fat_sym} {data["ж"]:.0f}г (день: {DAY_LOAD_LABEL[load]}, '
                      f'диапазон {ffloor:.0f}–{fcap:.0f}){fat_note}')
-        if day_phase == 'поддержание':
-            bal_sym = '✓' if abs(deficit) <= 200 else '⚠'
+        lo, hi = day_deficit_window(load, goals, mode)
+        if mode == 'поддержание':
+            bal_sym = '✓' if lo <= deficit <= hi else '⚠'
             lines.append(f'- Баланс:    {bal_sym} {deficit:.0f} ккал (поддержание, цель ~0)')
-        elif deficit_min and deficit_max:
-            if deficit < 0:
-                d_sym, d_note = '✗', ' (профицит)'
-            elif deficit_min <= deficit <= deficit_max:
+        else:
+            if deficit < lo:
+                d_sym = '✗' if deficit < 0 else '⚠'
+                d_note = f' (переедание: ниже окна на {lo - deficit:.0f})'
+            elif deficit <= hi:
                 d_sym, d_note = '✓', ''
-            elif deficit < deficit_min:
-                d_sym, d_note = '⚠', f' (меньше цели на {deficit_min - deficit:.0f})'
+            elif load == 'low':
+                d_sym, d_note = '✓', f' (жёстче цели на {deficit - hi:.0f})'
             else:
-                d_sym, d_note = '✓', f' (выше коридора на {deficit - deficit_max:.0f})'
-            lines.append(f'- Дефицит:   {d_sym} {deficit:.0f} ккал (цель {deficit_min}–{deficit_max}){d_note}')
+                d_sym, d_note = '⚠', f' (недоедание: выше окна на {deficit - hi:.0f} — добрать углей)'
+            lines.append(f'- Дефицит:   {d_sym} {deficit:.0f} ккал (день: {DAY_LOAD_LABEL[load]}, окно {lo}–{hi}){d_note}')
         lines += day_med_verdict(ref)
         lines += rolling7_med_verdict(ref)
         print('\n'.join(lines))
@@ -825,7 +863,7 @@ def main():
     elif cmd == 'week':
         start, end = week_range(ref)
         label = 'Итоги недели'
-        phase = cycle_phase(start)
+        show_week = True
     elif cmd == 'month':
         start, end = month_range(ref)
         label = 'Итоги месяца'
@@ -849,7 +887,7 @@ def main():
         print(f'Unknown command: {cmd}')
         sys.exit(1)
 
-    print(fmt(summarize(start, end), label, phase))
+    print(fmt(summarize(start, end), label, show_week))
 
 
 if __name__ == '__main__':

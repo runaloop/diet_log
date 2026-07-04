@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from plan_ration import parse_plan, PROT_TOL
-from summary import week_range, cycle_phase, protein_floor
+from summary import protein_floor
 
 
 def is_table_line(line):
@@ -99,8 +99,7 @@ if __name__ == '__main__':
         from datetime import date
         ref = date(int(d.group(3)), int(d.group(2)), int(d.group(1))) if d else None
         if ref:
-            week_start, _ = week_range(ref)
-            floor = protein_floor(cycle_phase(week_start))
+            floor = protein_floor()
             day_prot = plan['prot_eaten'] + rem[1]
             sym = '✓' if day_prot >= floor - PROT_TOL else '⚠'
             print(f'Белок за день с добором остатка: {sym} {day_prot:.0f}/{floor:.0f}г')

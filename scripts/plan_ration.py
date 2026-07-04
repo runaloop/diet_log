@@ -10,7 +10,9 @@ no-cook food, without repeating a dish, and never pushing a limit group
 
 Priority stack (lexicographic, STRATEGY.md §3):
   1. food-group pattern     → pick the most-behind floor group, close it
-  2. weekly cycle           → today's kcal ceiling already reflects the phase
+  2. day periodization      → today's kcal ceiling reflects the day's
+                              training load (§7a): deficit on easy days,
+                              fueling on training days
   3. daily targets          → kcal ceiling (soft) + protein floor (hard)
                               + the day's fat range (rest 1.0–1.2 / mid
                               0.9–1.0 / high 0.8–0.9 g/kg by training load;
@@ -39,7 +41,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from summary import (GROUP_QUOTA, GROUP_ORDER, GRAM_GROUPS, DAY_FAT_RANGE,
-                     DAY_LOAD_LABEL, week_range, cycle_phase, protein_floor,
+                     DAY_LOAD_LABEL, global_mode, protein_floor,
                      fat_range, day_load, group_servings)
 from profile import parse_food_rows, load_canon
 from paths import DB_PATH, PROFILE_PATH, RATION, diary_path
@@ -71,9 +73,9 @@ FAT_TOL = 5           # fat floor considered met within this many grams
 FATQ_RANK = {'good': 0, 'neutral': 1, 'bad': 2}
 PREP_RANK = {'low': 0, 'med': 1, None: 1.5, 'high': 2}
 
-# Load-week carb layer (STRATEGY.md §9): on a maintenance/load week, top up
-# carb-forward dishes toward the full daily carb target. No dish-count cap —
-# the kcal/fat budgets are the limiter.
+# Training-day carb layer (STRATEGY.md §9): on mid/high days (and in
+# maintenance mode) top up carb-forward dishes toward the full daily carb
+# target. No dish-count cap — the kcal/fat budgets are the limiter.
 CARB_TOL = 12
 
 SUPP_GROUP = 'добавки'
@@ -88,8 +90,9 @@ def grab(text, pat):
 
 def parse_plan(text):
     """Today's soft budget from the `## План` block: kcal ceiling + protein eaten."""
-    m = re.search(r'Фаза цикла:\s*(\S+)', text)
-    phase = m.group(1) if m else 'дефицит'
+    # H1 label: «Режим:» today; «Фаза цикла:» in pre-§7a diaries.
+    m = re.search(r'(?:Режим|Фаза цикла):\s*(\S+)', text)
+    phase = m.group(1) if m else 'похудение'
     # `Можно съесть ...: <ceiling> ккал`. Tolerates both the compact format
     # (`до −500:` / `до 0:`, AGENTS.md) and the legacy verbose one
     # (`(чтобы сохранить дефицит 500 ккал):`). Minus may be ASCII `-` or U+2212.
@@ -331,9 +334,9 @@ def is_carb_forward(d):
 
 def carb_fill(dishes, target, ration, servings, used, room, group_count,
               kcal_left, fat_left, cal_cap, max_dishes, eaten, seed):
-    """Load-week carb layer: pull carb-forward dishes toward `target` (peri-workout
-    fuel). The kcal/fat budgets are the limiter, not a dish count. Skipped on
-    deficit weeks (§9)."""
+    """Training-day carb layer: pull carb-forward dishes toward `target`
+    (peri-workout fuel). The kcal/fat budgets are the limiter, not a dish
+    count. Skipped on rest days in похудение mode (§9)."""
     cur = sum(d['u'] for d in ration)
     while cur < target - CARB_TOL and n_dishes(ration) < max_dishes:
         cands = [d for d in dishes
@@ -461,7 +464,7 @@ def fat_floor_topup(dishes, ration, plan, servings, used, room, group_count,
         room = limit_headroom(servings)
 
 
-def build(plan, dishes, servings, eaten, seed, cphase, load='low',
+def build(plan, dishes, servings, eaten, seed, mode, load='low',
           pins=None, exclude=None):
     exclude_names = {e.lower() for e in (exclude or [])}
     dishes = [d for d in dishes if d['name'].lower() not in exclude_names]
@@ -512,14 +515,15 @@ def build(plan, dishes, servings, eaten, seed, cphase, load='low',
         if not progressed or kcal_left <= 0:
             break
 
-    floor = protein_floor(cphase)
+    floor = protein_floor()
     rem_prot = max(0.0, floor - plan['prot_eaten']
                    - sum(d['b'] for d in ration))
     protein_topup(dishes, rem_prot, ration, servings, used, room, group_count,
                   fat_left, cal_cap, max_dishes, eaten, seed)
 
-    # Load-week carb layer (§9): top up carbs to the full daily target.
-    if cphase == 'поддержание':
+    # Training-day carb layer (§9): top up carbs to the full daily target on
+    # mid/high days; in maintenance mode — every day.
+    if mode == 'поддержание' or load in ('mid', 'high'):
         kcal_left = plan['kcal'] - sum(d['k'] for d in ration)
         fat_left = max(0.0, fcap - plan['fat_eaten']
                        - sum(d['zh'] for d in ration))
@@ -566,14 +570,9 @@ def dish_label(d):
     return f"{d['name']} {raw}" if n == 1 else f"{d['name']} {n}x {raw}"
 
 
-def _phase_key(phase):
-    return 'дефицит' if phase.startswith('дефицит') else 'поддержание'
-
-
-def render(plan, ration, floor, servings, cphase, load):
-    phase = plan['phase']
+def render(plan, ration, floor, servings, mode, load):
     ffloor, fcap = fat_range(load)
-    print(f"Фаза: {phase} | потолок ккал: {plan['kcal']:.0f} | "
+    print(f"Режим: {mode} | потолок ккал: {plan['kcal']:.0f} | "
           f"белок-флор: {floor:.0f}г (съедено {plan['prot_eaten']:.0f}) | "
           f"жир: {ffloor:.0f}–{fcap:.0f}г (день: {DAY_LOAD_LABEL[load]}, "
           f"съедено {plan['fat_eaten']:.0f})")
@@ -714,7 +713,6 @@ if __name__ == '__main__':
     diary_arg = pos[0]
     text = Path(diary_arg).read_text(encoding='utf-8')
     ref = diary_date(diary_arg)
-    week_start, _ = week_range(ref)  # ISO frame: phase cycle only
     win_start = ref - timedelta(days=6)  # rolling frame: groups + anti-repeat
     plan = parse_plan(text)
     dishes = load_dishes()
@@ -726,11 +724,11 @@ if __name__ == '__main__':
     servings = servings or {}
     eaten = eaten_recent(win_start, ref)
     seed = date_seed(diary_arg)
-    cphase = cycle_phase(week_start)
+    mode = global_mode()
     # Day load: --load declares the planned training up front; otherwise
     # classified from the workouts already logged in the diary.
     load = load_arg or day_load(ref)
-    ration, floor = build(plan, dishes, dict(servings), eaten, seed, cphase,
+    ration, floor = build(plan, dishes, dict(servings), eaten, seed, mode,
                            load, pins=pins, exclude=exclude)
     # --write: ensure ration.md exists for this day (base plan, no leftovers).
     # Never clobber a current-day file — that would wipe checkmarks/leftovers,
@@ -744,4 +742,4 @@ if __name__ == '__main__':
             RATION.write_text(render_ration_md(ref, ration), encoding='utf-8')
             print(f'ration.md создан на {ref} ({len(ration)} блюд).')
     else:
-        render(plan, ration, floor, dict(servings), cphase, load)
+        render(plan, ration, floor, dict(servings), mode, load)
