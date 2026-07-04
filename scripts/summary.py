@@ -801,7 +801,6 @@ def main():
         mode = global_mode()
         target_protein = protein_floor(goals)
         deficit = data.get('дефицит', 0)
-        projected = deficit / 7700
         lines = [
             f'## Итоги дня {ref}',
             '',
@@ -809,9 +808,13 @@ def main():
             f'- Потрачено тренировками: {data["потрачено"]:.0f} ккал',
             f'- Дефицит: {deficit:.0f} ккал',
         ]
-        if deficit != 0:
+        last = load_last_weight()
+        if last and last[0] <= ref:
+            total_def = summarize(last[0], ref)['дефицит']
+            projected = total_def / 7700
             sign = '−' if projected > 0 else '+'
-            lines.append(f'- Прогнозируемое снижение: {sign}{abs(projected):.2f} кг')
+            lines.append(f'- Снижение с взвешивания {last[0]} ({last[1]} кг): '
+                         f'{sign}{abs(projected):.2f} кг → расчётный вес ~{last[1] - projected:.1f}')
         lines.append('')
         lines.append('### Макросы')
         if target_protein:

@@ -297,6 +297,19 @@ def fetch(date, raw=False):
         print(f"steps:  {steps}")
 
 
+def _zone_kcal(a, active_kcal):
+    """Split a workout's active kcal across HR zones pro rata by time.
+
+    Garmin gives seconds per HR zone (hrTimeInZone_1..5); kcal are not
+    reported per zone, so time share is the estimate. Empty zones dropped.
+    """
+    times = [(z, a.get(f"hrTimeInZone_{z}") or 0.0) for z in range(1, 6)]
+    total = sum(t for _, t in times)
+    if not total or not active_kcal:
+        return {}
+    return {z: active_kcal * t / total for z, t in times if t > 0}
+
+
 def activities(date, raw=False):
     opener, tokens = _session()
     acts = api_get(
@@ -320,9 +333,16 @@ def activities(date, raw=False):
         # BMR burned during the workout, which the diary's base expenditure
         # already covers — subtracting bmrCalories avoids double counting.
         kcal = round((a.get("calories") or 0) - (a.get("bmrCalories") or 0))
+        zones = _zone_kcal(a, kcal)
+        zone_s = ""
+        if zones:
+            dom = max(zones, key=zones.get)
+            parts = " · ".join(f"Z{z} {round(v)}" for z, v in sorted(zones.items())
+                               if round(v) > 0)
+            zone_s = f" | Z{dom} ({parts} kcal)"
         hr = a.get("averageHR")
         hr_s = f" | avgHR {round(hr)}" if hr else ""
-        print(f"{start} | {type_key} | {name} | {mins} min | {kcal} kcal{hr_s}")
+        print(f"{start} | {type_key} | {name} | {mins} min | {kcal} kcal{zone_s}{hr_s}")
 
 
 def base(date, raw=False):
