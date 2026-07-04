@@ -120,21 +120,76 @@ def protein_floor(phase=None, goals=None):
     return round(lw[1] * factor)
 
 
-# Daily fat cap, g per kg body weight — phase-independent (STRATEGY.md §7):
-# fat is a top-side budget, not a target; carbs get whatever kcal it frees.
-FAT_PER_KG = 0.8
+# Daily fat safe range, g per kg body weight, cycled by the day's training
+# load (STRATEGY.md §7): rest days run fat high (satiety on a deficit +
+# hormones), hard days push it to the bottom of the band so the freed kcal
+# go to peri-workout carbs. Cap is hard for the generated plan, floor is a
+# soft top-up; period averages are judged against the full band.
+DAY_FAT_RANGE = {           # g/kg (floor, cap)
+    'low': (1.0, 1.2),      # rest day: walks / no real training
+    'mid': (0.9, 1.0),      # ≥300 kcal in Z2
+    'high': (0.8, 0.9),     # ≥300 kcal in Z3+ / strength, target the floor
+}
+FAT_RANGE_ALL = (0.8, 1.2)  # the full band, for period averages
+DAY_LOAD_KCAL = 300         # training kcal that make a day mid/high
+DAY_LOAD_LABEL = {'low': 'отдых', 'mid': 'средний', 'high': 'высокий'}
+
+# Fat-quality shares of the rolling week's fat grams (STRATEGY.md §7):
+# bad is a real status (✓/⚠/✗), good is a symbol-free nudge that hides
+# once the target is reached.
+FAT_BAD_SHARE_CAP = 0.15
+FAT_GOOD_SHARE_TARGET = 0.40
 
 
-def fat_cap(goals=None):
-    """Daily fat cap in grams: 0.8 g/kg body weight (STRATEGY.md §7).
+def fat_range(load=None, goals=None):
+    """(floor_g, cap_g) of the day's fat range (STRATEGY.md §7).
 
-    Weight comes from the latest user.md entry; falls back to the goals.md
-    range average when no weight is on record.
+    load ∈ {'low','mid','high'} — the day's training load (see day_load);
+    None → the full 0.8–1.2 band (period averages). Weight comes from the
+    latest user.md entry; with no weight on record both bounds fall back to
+    the goals.md range average.
     """
+    per_kg = DAY_FAT_RANGE.get(load, FAT_RANGE_ALL)
     lw = load_last_weight()
     if lw is None:
-        return (goals or load_goals()).get('fat', 0)
-    return round(lw[1] * FAT_PER_KG)
+        fallback = (goals or load_goals()).get('fat', 0)
+        return fallback, fallback
+    return round(lw[1] * per_kg[0]), round(lw[1] * per_kg[1])
+
+
+ZONE_RE = re.compile(r'\bz\s*([1-5])', re.IGNORECASE)
+HIGH_LOAD_RE = re.compile(r'силов|интервал', re.IGNORECASE)
+# NEAT top-up and walks are not training for the fat cycle.
+LOAD_IGNORE_RE = re.compile(r'прочая активность|прогулк|ходьб', re.IGNORECASE)
+
+
+def day_load(ref: date):
+    """Classify the day's training load for the fat range (STRATEGY.md §7).
+
+    'high' — ≥300 kcal in Z3+/strength/intervals; 'mid' — ≥300 kcal of
+    training counting Z2 and unknown-zone workouts (the agent asks the zone
+    anyway for carb compensation); 'low' — rest, walks, NEAT only.
+    """
+    from profile import parse_activity_rows
+
+    path = diary_path(ref)
+    if not path.exists():
+        return 'low'
+    hi = mid = 0.0
+    for name, kcal in parse_activity_rows(path.read_text().split('\n')):
+        if LOAD_IGNORE_RE.search(name):
+            continue
+        m = ZONE_RE.search(name)
+        zone = int(m.group(1)) if m else None
+        if HIGH_LOAD_RE.search(name) or (zone is not None and zone >= 3):
+            hi += kcal
+        elif zone is None or zone == 2:
+            mid += kcal
+    if hi >= DAY_LOAD_KCAL:
+        return 'high'
+    if hi + mid >= DAY_LOAD_KCAL:
+        return 'mid'
+    return 'low'
 
 
 def phase_deficit_target(phase, goals):
@@ -320,10 +375,15 @@ def fmt(r, label, phase=None):
                 else:
                     c_sym, c_note = '✓', ''
                 lines.append(f'- Углеводы: {c_sym} {r["у"]:.0f}г (цель {у_цель:.0f}г суммарно{c_note})')
-            target_fat = goals.get('fat', 0)
-            if target_fat and r['avg_ж'] > target_fat * 1.2:
-                overrun = r['avg_ж'] - target_fat
-                lines.append(f'- Жиры:     ⚠ {r["avg_ж"]:.0f}г/день (цель {target_fat:.0f}г, перебор {overrun:.0f}г)')
+            # Period averages are judged against the full band, strictly —
+            # the 1.2 tolerance is a single-day softness, not an average one,
+            # and the day cycle (§7) averages out inside the band.
+            ffloor_, fcap_ = fat_range(None, goals)
+            if fcap_ and r['avg_ж'] > fcap_:
+                overrun = r['avg_ж'] - fcap_
+                lines.append(f'- Жиры:     ⚠ {r["avg_ж"]:.0f}г/день (диапазон {ffloor_:.0f}–{fcap_:.0f}г, перебор {overrun:.0f}г)')
+            elif ffloor_ and r['avg_ж'] < ffloor_:
+                lines.append(f'- Жиры:     ⚠ {r["avg_ж"]:.0f}г/день (диапазон {ffloor_:.0f}–{fcap_:.0f}г, ниже минимума)')
 
     lines.append(f'- Пропущенные дни: {", ".join(r["missing"]) or "нет"}')
     lines.append(f'- Дни без данных: {", ".join(r["no_data"]) or "нет"}')
@@ -409,6 +469,15 @@ def weektrend(ref: date, with_groups: bool = True):
                 lines.append(f'- Средний суточный дефицит: {avg_def:.0f} ккал (цель фазы {daily_target:.0f})')
             if target_protein and avg_prot < target_protein:
                 lines.append(f'- Белок: {avg_prot:.0f}г/день (цель {target_protein}) ⚠ недобор {target_protein - avg_prot:.0f}г/день')
+            # Fat line only when the weekly average leaves the full band —
+            # the day cycle (§7) swings inside it by design, the smoothed
+            # average is judged strictly.
+            ffloor, fcap = fat_range(None, goals)
+            avg_fat = r['avg_ж']
+            if fcap and avg_fat > fcap:
+                lines.append(f'- Жиры: {avg_fat:.0f}г/день ⚠ выше диапазона {ffloor}–{fcap}г (перебор {avg_fat - fcap:.0f}г/день)')
+            elif ffloor and avg_fat < ffloor:
+                lines.append(f'- Жиры: {avg_fat:.0f}г/день ⚠ ниже диапазона {ffloor}–{fcap}г — добрать хорошим жиром')
             if phase == 'поддержание':
                 sym = '✓' if abs(projected) <= 700 else '⚠'
                 proj_label = 'дефицита' if projected >= 0 else 'профицита'
@@ -420,6 +489,7 @@ def weektrend(ref: date, with_groups: bool = True):
     if with_groups:
         lines.append('')
         lines += group_remainder_lines(ref)
+        lines += fat_quality_lines(ref)
     return '\n'.join(lines)
 
 
@@ -512,6 +582,75 @@ def group_remainder_lines(ref: date):
         uniq = sorted(set(unmatched))
         sample = ', '.join(uniq[:6]) + ('…' if len(uniq) > 6 else '')
         out += ['', f'- Не привязаны к каталогу: {len(unmatched)} записей ({sample})']
+    return out
+
+
+def load_catalog_fat_quality():
+    """Map name/alias (lowercased) -> fat_quality ('good'|'neutral'|'bad')."""
+    if not DB_PATH.exists():
+        return None
+    con = sqlite3.connect(DB_PATH)
+    out, by_id = {}, {}
+    for pid, name, q in con.execute('SELECT id, name, fat_quality FROM product'):
+        by_id[pid] = q
+        out[name.lower()] = q
+    for pid, text in con.execute('SELECT product_id, text FROM alias'):
+        out.setdefault(text.lower(), by_id.get(pid, 'neutral'))
+    con.close()
+    return out
+
+
+def fat_quality_grams(start: date, end: date):
+    """Fat grams by catalog fat_quality over the diaries in [start, end].
+    Rows not in the catalog count as neutral — unknown isn't bad."""
+    from profile import parse_food_rows
+
+    catalog = load_catalog_fat_quality()
+    if catalog is None:
+        return None
+    grams = {'good': 0.0, 'neutral': 0.0, 'bad': 0.0}
+    d = start
+    while d <= end:
+        path = diary_path(d)
+        if path.exists():
+            for name, _grams, _k, _b, zh, _u in parse_food_rows(
+                    path.read_text().split('\n')):
+                if zh:
+                    grams[catalog.get(name.lower(), 'neutral')] += zh
+        d += timedelta(days=1)
+    return grams
+
+
+def fat_quality_lines(ref: date):
+    """Fat-quality block over the rolling 7-day window (STRATEGY.md §7).
+
+    bad share carries a status symbol (it's harm); good share is a plain
+    recommendation line that only appears while below target (it's an
+    opportunity, not a problem). Both fine → one green line."""
+    win_start = ref - timedelta(days=6)
+    grams = fat_quality_grams(win_start, ref)
+    if grams is None:
+        return []
+    total = sum(grams.values())
+    if total <= 0:
+        return []
+    bad = grams['bad'] / total
+    good = grams['good'] / total
+    bad_ok = bad <= FAT_BAD_SHARE_CAP
+    good_ok = good >= FAT_GOOD_SHARE_TARGET
+    out = ['', f'### Качество жира (7 дней {win_start}..{ref})']
+    if bad_ok and good_ok:
+        out.append(f'- bad: ✓ {bad*100:.0f}% · good {good*100:.0f}%')
+        return out
+    if bad_ok:
+        out.append(f'- bad: ✓ {bad*100:.0f}% (потолок {FAT_BAD_SHARE_CAP*100:.0f})')
+    else:
+        sym = '⚠' if bad <= FAT_BAD_SHARE_CAP * 2 else '✗'
+        out.append(f'- bad: {sym} {bad*100:.0f}% (потолок {FAT_BAD_SHARE_CAP*100:.0f})'
+                   ' — фритюр/выпечка/переработка')
+    if not good_ok:
+        out.append(f'- good {good*100:.0f}% — можно больше '
+                   f'(ориентир {FAT_GOOD_SHARE_TARGET*100:.0f}+): рыба, орехи, оливковое')
     return out
 
 
@@ -653,10 +792,16 @@ def main():
             else:
                 c_sym, c_note = '✓', ''
             lines.append(f'- Углеводы:  {c_sym} {data["у"]:.0f}/{у_цель:.0f}г{c_note}')
-        target_fat = fat_cap(goals)
-        fat_sym = '⚠' if target_fat and data['ж'] > target_fat * 1.2 else '✓'
-        fat_note = f' (перебор {data["ж"] - target_fat:.0f}г)' if target_fat and data['ж'] > target_fat * 1.2 else ''
-        lines.append(f'- Жиры:      {fat_sym} {data["ж"]:.0f}/{target_fat:.0f}г{fat_note}')
+        load = day_load(ref)
+        ffloor, fcap = fat_range(load, goals)
+        if fcap and data['ж'] > fcap * 1.2:
+            fat_sym, fat_note = '⚠', f' (перебор {data["ж"] - fcap:.0f}г)'
+        elif ffloor and data['ж'] < ffloor:
+            fat_sym, fat_note = '⚠', f' (ниже минимума на {ffloor - data["ж"]:.0f}г)'
+        else:
+            fat_sym, fat_note = '✓', ''
+        lines.append(f'- Жиры:      {fat_sym} {data["ж"]:.0f}г (день: {DAY_LOAD_LABEL[load]}, '
+                     f'диапазон {ffloor:.0f}–{fcap:.0f}){fat_note}')
         if day_phase == 'поддержание':
             bal_sym = '✓' if abs(deficit) <= 200 else '⚠'
             lines.append(f'- Баланс:    {bal_sym} {deficit:.0f} ккал (поддержание, цель ~0)')

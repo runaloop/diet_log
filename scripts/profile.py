@@ -94,6 +94,37 @@ def parse_food_rows(lines):
         yield name, grams, k, g('Б', 3), g('Ж', 4), g('У', 5)
 
 
+def parse_activity_rows(lines):
+    """Yield (name, kcal_burned) for each training row (К<0), kcal positive."""
+    in_table = False
+    col = {}
+    for line in lines:
+        s = line.strip()
+        if not (s.startswith('|') and s.endswith('|') and len(s) > 1):
+            in_table = False
+            continue
+        cells = [c.strip() for c in s[1:-1].split('|')]
+        if 'Продукт/Активность' in cells or 'Продукт' in cells:
+            in_table = True
+            col = {c: i for i, c in enumerate(cells)}
+            continue
+        if in_table and all(re.fullmatch(r':?-+:?', c) for c in cells if c):
+            continue
+        if not in_table:
+            continue
+
+        k_i = col.get('К', 2)
+        if len(cells) <= k_i:
+            continue
+        k = parse_float(cells[k_i])
+        if k is None or k >= 0:
+            continue
+        name_i = col.get('Продукт/Активность', col.get('Продукт', 1))
+        if len(cells) <= name_i or not cells[name_i]:
+            continue
+        yield cells[name_i], -k
+
+
 def load_canon():
     """Diary spelling (lower) -> canonical catalog name, via product+alias.
 
