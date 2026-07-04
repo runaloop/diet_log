@@ -316,7 +316,10 @@ def activities(date, raw=False):
         type_key = (a.get("activityType") or {}).get("typeKey", "?")
         name = a.get("activityName") or type_key
         mins = round((a.get("duration") or 0) / 60)
-        kcal = round(a.get("calories") or 0)
+        # Log active kcal only: device `calories` is total and includes the
+        # BMR burned during the workout, which the diary's base expenditure
+        # already covers — subtracting bmrCalories avoids double counting.
+        kcal = round((a.get("calories") or 0) - (a.get("bmrCalories") or 0))
         hr = a.get("averageHR")
         hr_s = f" | avgHR {round(hr)}" if hr else ""
         print(f"{start} | {type_key} | {name} | {mins} min | {kcal} kcal{hr_s}")
