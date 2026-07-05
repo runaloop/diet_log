@@ -126,11 +126,12 @@ def protein_floor(goals=None):
 # soft top-up; period averages are judged against the full band.
 DAY_FAT_RANGE = {           # g/kg (floor, cap)
     'low': (1.0, 1.2),      # rest day: walks / no real training
-    'mid': (0.9, 1.0),      # ≥300 kcal in Z2
+    'mid': (0.9, 1.0),      # ≥200 kcal in Z2
     'high': (0.8, 0.9),     # ≥300 kcal in Z3+ / strength, target the floor
 }
 FAT_RANGE_ALL = (0.8, 1.2)  # the full band, for period averages
-DAY_LOAD_KCAL = 300         # training kcal that make a day mid/high
+DAY_LOAD_KCAL_HIGH = 300    # Z3+/strength kcal that make a day high
+DAY_LOAD_KCAL_MID = 200     # training kcal (Z2 counted) that make a day mid
 DAY_LOAD_LABEL = {'low': 'отдых', 'mid': 'средний', 'high': 'высокий'}
 
 # Fat-quality shares of the rolling week's fat grams (STRATEGY.md §7):
@@ -182,9 +183,9 @@ def _day_signals(ref: date):
             hi += kcal
         elif zone is None or zone == 2:
             mid += kcal
-    if hi >= DAY_LOAD_KCAL:
+    if hi >= DAY_LOAD_KCAL_HIGH:
         return 'high', hi
-    if hi + mid >= DAY_LOAD_KCAL:
+    if hi + mid >= DAY_LOAD_KCAL_MID:
         return 'mid', hi
     return 'low', hi
 
@@ -192,7 +193,7 @@ def _day_signals(ref: date):
 def day_load(ref: date):
     """Classify the day's training load (STRATEGY.md §7/§7a).
 
-    'high' — ≥300 kcal in Z3+/strength/intervals; 'mid' — ≥300 kcal of
+    'high' — ≥300 kcal in Z3+/strength/intervals; 'mid' — ≥200 kcal of
     training counting Z2 and unknown-zone workouts (the agent asks the zone
     anyway); 'low' — rest, walks, NEAT only. A rest day after >900 kcal of
     Z3+ work is bumped to 'mid' (recovery carryover) — for the whole day:
