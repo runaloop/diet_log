@@ -336,10 +336,21 @@ def activities(date, raw=False):
         zones = _zone_kcal(a, kcal)
         zone_s = ""
         if zones:
-            dom = max(zones, key=zones.get)
+            # A workout counts as steady (Z1/Z2) only if ≥90% of its kcal live
+            # there; otherwise the Z3+ share is meaningful → treat it as an
+            # interval/hard session so day_load buckets it as high, not mid.
+            total_z = sum(zones.values())
+            low = zones.get(1, 0.0) + zones.get(2, 0.0)
+            low_share = low / total_z if total_z else 0.0
             parts = " · ".join(f"Z{z} {round(v)}" for z, v in sorted(zones.items())
                                if round(v) > 0)
-            zone_s = f" | Z{dom} ({parts} kcal)"
+            if low_share >= 0.90:
+                dom = max((z for z in zones if z <= 2), key=zones.get)
+                label = f"Z{dom}"
+            else:
+                hi_dom = max((z for z in zones if z >= 3), key=zones.get, default=3)
+                label = f"интервалы Z{hi_dom}"
+            zone_s = f" | {label} · low {round(low_share * 100)}% ({parts} kcal)"
         hr = a.get("averageHR")
         hr_s = f" | avgHR {round(hr)}" if hr else ""
         print(f"{start} | {type_key} | {name} | {mins} min | {kcal} kcal{zone_s}{hr_s}")
