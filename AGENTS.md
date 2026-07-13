@@ -43,6 +43,7 @@
     ├── paths.py               — центральный резолвер путей (ROOT/CONFIG/DATA/DIARIES)
     ├── db / db.py             — обёртка работы с data/diet.db (add/find/q/tag/review)
     ├── summary.py             — итоги дня/недели/месяца + weektrend
+    ├── caffeine.py            — среднее потребление кофеина по строкам кофе в дневниках (граммы зерна × 10 мг/г)
     ├── garmin_sync.py         — синк с Garmin API: login/fetch/activities/base/weight (stdlib, токены вне репо)
     ├── profile.py             — пересборка data/profile.json из дневников
     ├── plan_ration.py         — добор остатка бюджета (заменяется по docs/STRATEGY.md)
@@ -474,6 +475,7 @@ python3 scripts/plan_ration.py diaries/YYYY/MM/DD.md \
 | рацион | Показать добор остатка из staples (`scripts/plan_ration.py diaries/YYYY/MM/DD.md`) |
 | синк гармин | Забрать с часов сводку, тренировки и вес (`scripts/garmin_sync.py fetch` + `activities` + `weight`), залогировать недостающие тренировки, новое взвешивание — в `config/user.md` |
 | пересобрать профиль | Перестроить `data/profile.json` из дневников (`scripts/profile.py`) |
+| кофеин | Среднее потребление кофеина за период (`scripts/caffeine.py [дней | диапазон]`, по умолчанию 30 дней); кофе логируется в дневник обычной строкой с граммовкой зерна |
 
 ## Недельная накопительная метрика
 
