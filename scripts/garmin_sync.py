@@ -20,6 +20,7 @@ Usage:
   python3 scripts/garmin_sync.py fetch [YYYY-MM-DD]      # daily summary
   python3 scripts/garmin_sync.py activities [YYYY-MM-DD] # workouts of the day
   python3 scripts/garmin_sync.py base [YYYY-MM-DD]       # 4-week avg resting kcal
+  python3 scripts/garmin_sync.py weight [YYYY-MM-DD]     # latest weigh-in up to date
   (any command accepts --json for the raw API response)
 """
 
@@ -378,6 +379,25 @@ def base(date, raw=False):
           f"({len(days)} days, range {round(lo)}-{round(hi)})")
 
 
+def weight(date, raw=False):
+    opener, tokens = _session()
+    res = api_get(
+        opener, tokens, "/weight-service/weight/latest",
+        params={"date": date, "ignorePriority": "true"},
+    )
+    if raw:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+    grams = (res or {}).get("weight")
+    if not grams:
+        print(f"no weigh-ins up to {date}")
+        return
+    kg = round(grams / 1000, 1)
+    when = res.get("calendarDate") or date
+    source = res.get("sourceType") or "?"
+    print(f"weight: {kg} kg | date: {when} | source: {source}")
+
+
 def main():
     args = [a for a in sys.argv[1:] if a != "--json"]
     raw = "--json" in sys.argv
@@ -388,9 +408,10 @@ def main():
     try:
         if cmd == "login":
             login()
-        elif cmd in ("fetch", "activities", "base"):
+        elif cmd in ("fetch", "activities", "base", "weight"):
             date = args[1] if len(args) > 1 else time.strftime("%Y-%m-%d")
-            {"fetch": fetch, "activities": activities, "base": base}[cmd](date, raw=raw)
+            {"fetch": fetch, "activities": activities,
+             "base": base, "weight": weight}[cmd](date, raw=raw)
         else:
             print(f"unknown command: {cmd}", file=sys.stderr)
             sys.exit(2)
