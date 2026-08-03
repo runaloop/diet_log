@@ -4,6 +4,7 @@ __pycache__/
 # local working files (single-machine, not synced)
 ration.md
 pills.md
+pills_history.jsonl
 data/profile.json
 .claude/settings.local.json
 

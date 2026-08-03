@@ -119,17 +119,23 @@ def protein_floor(goals=None):
     return round(lw[1] * PROTEIN_PER_KG)
 
 
-# Daily fat safe range, g per kg body weight, cycled by the day's training
-# load (STRATEGY.md §7): rest days run fat high (satiety on a deficit +
-# hormones), hard days push it to the bottom of the band so the freed kcal
-# go to peri-workout carbs. Cap is hard for the generated plan, floor is a
-# soft top-up; period averages are judged against the full band.
-DAY_FAT_RANGE = {           # g/kg (floor, cap)
-    'low': (1.0, 1.2),      # rest day: walks / no real training
-    'mid': (0.9, 1.0),      # ≥200 kcal in Z2
-    'high': (0.8, 0.9),     # ≥300 kcal in Z3+ / strength, target the floor
+# Daily fat range as a *share of the day's kcal budget*, cycled by the
+# day's training load (STRATEGY.md §7). A share, not g/kg: the budget
+# shrinks as weight drops and as the deficit window widens, while a fixed
+# g/kg floor does not — on 2026-08-03 the old 1.0 g/kg rest-day floor was
+# 720 of a 1633 kcal budget (44% before a single carb), leaving 84g of
+# carbs. The share cycles counter to carbs: rest days run fat-heavy for
+# satiety and hormones, hard days hand the freed kcal to peri-workout carbs.
+DAY_FAT_SHARE = {           # share of the day's kcal budget (floor, cap)
+    'low': (0.35, 0.42),    # rest day: walks / no real training
+    'mid': (0.30, 0.35),    # ≥200 kcal in Z2
+    'high': (0.25, 0.30),   # ≥300 kcal in Z3+ / strength, target the floor
 }
-FAT_RANGE_ALL = (0.8, 1.2)  # the full band, for period averages
+FAT_SHARE_ALL = (0.25, 0.42)  # the full band, for period averages
+# Hormonal safety net: the share never puts the floor below this, however
+# small the day's budget gets.
+FAT_FLOOR_PER_KG = 0.6
+FAT_RANGE_ALL = (0.8, 1.2)  # legacy g/kg band — fallback when no budget
 DAY_LOAD_KCAL_HIGH = 300    # Z3+/strength kcal that make a day high
 DAY_LOAD_KCAL_MID = 200     # training kcal (Z2 counted) that make a day mid
 DAY_LOAD_LABEL = {'low': 'отдых', 'mid': 'средний', 'high': 'высокий'}
@@ -141,20 +147,27 @@ FAT_BAD_SHARE_CAP = 0.15
 FAT_GOOD_SHARE_TARGET = 0.40
 
 
-def fat_range(load=None, goals=None):
+def fat_range(load=None, goals=None, budget=None):
     """(floor_g, cap_g) of the day's fat range (STRATEGY.md §7).
 
     load ∈ {'low','mid','high'} — the day's training load (see day_load);
-    None → the full 0.8–1.2 band (period averages). Weight comes from the
-    latest user.md entry; with no weight on record both bounds fall back to
-    the goals.md range average.
+    None → the full band (period averages). `budget` is the day's kcal
+    budget (see day_budget) — for a period, its per-day average. Without a
+    budget the range falls back to the legacy g/kg band, since a share of
+    an unknown budget is unknown. Weight comes from the latest user.md
+    entry; with no weight on record both bounds fall back to goals.md.
     """
-    per_kg = DAY_FAT_RANGE.get(load, FAT_RANGE_ALL)
     lw = load_last_weight()
+    if budget:
+        share = DAY_FAT_SHARE.get(load, FAT_SHARE_ALL)
+        floor, cap = budget * share[0] / 9, budget * share[1] / 9
+        if lw is not None:
+            floor = max(floor, lw[1] * FAT_FLOOR_PER_KG)
+        return round(floor), round(max(cap, floor))
     if lw is None:
         fallback = (goals or load_goals()).get('fat', 0)
         return fallback, fallback
-    return round(lw[1] * per_kg[0]), round(lw[1] * per_kg[1])
+    return round(lw[1] * FAT_RANGE_ALL[0]), round(lw[1] * FAT_RANGE_ALL[1])
 
 
 ZONE_RE = re.compile(r'\bz\s*([1-5])', re.IGNORECASE)
@@ -224,6 +237,26 @@ def day_deficit_window(load, goals=None, mode=None):
         g = goals or load_goals()
         return g.get('deficit_min', 300), g.get('deficit_max', 500)
     return DAY_DEFICIT_WINDOW[load]
+
+
+def avg_day_budget(r):
+    """Per-day kcal budget averaged over a summarize() period.
+
+    deficit = base + spent − eaten, so base + spent = deficit + eaten and
+    the budget is that minus the day's window floor — no extra plumbing
+    needed, `цель_min` already sums those floors over the period.
+    """
+    if not r.get('n'):
+        return 0.0
+    return max(0.0, (r['дефицит'] + r['съедено'] - r['цель_min']) / r['n'])
+
+
+def day_budget(base, spent, load, goals=None, mode=None):
+    """The day's kcal eating budget: base + workouts − the bottom of the
+    day's deficit window, i.e. the most one may eat and still land in the
+    window. This is what the fat share is taken from (STRATEGY.md §7)."""
+    lo, _ = day_deficit_window(load, goals, mode)
+    return max(0.0, base + spent - lo)
 
 
 def status(actual, target, invert=False):
@@ -415,8 +448,9 @@ def fmt(r, label, show_week=False):
                 lines.append(f'- Углеводы: {c_sym} {r["у"]:.0f}г (цель {у_цель:.0f}г суммарно{c_note})')
             # Period averages are judged against the full band, strictly —
             # the 1.2 tolerance is a single-day softness, not an average one,
-            # and the day cycle (§7) averages out inside the band.
-            ffloor_, fcap_ = fat_range(None, goals)
+            # and the day cycle (§7) averages out inside the band. The band
+            # is a share of the period's average day budget (§7).
+            ffloor_, fcap_ = fat_range(None, goals, avg_day_budget(r))
             if fcap_ and r['avg_ж'] > fcap_:
                 overrun = r['avg_ж'] - fcap_
                 lines.append(f'- Жиры:     ⚠ {r["avg_ж"]:.0f}г/день (диапазон {ffloor_:.0f}–{fcap_:.0f}г, перебор {overrun:.0f}г)')
@@ -510,7 +544,7 @@ def weektrend(ref: date, with_groups: bool = True):
             # Fat line only when the weekly average leaves the full band —
             # the day cycle (§7) swings inside it by design, the smoothed
             # average is judged strictly.
-            ffloor, fcap = fat_range(None, goals)
+            ffloor, fcap = fat_range(None, goals, avg_day_budget(r))
             avg_fat = r['avg_ж']
             if fcap and avg_fat > fcap:
                 lines.append(f'- Жиры: {avg_fat:.0f}г/день ⚠ выше диапазона {ffloor}–{fcap}г (перебор {avg_fat - fcap:.0f}г/день)')
@@ -833,7 +867,11 @@ def main():
                 c_sym, c_note = '✓', ''
             lines.append(f'- Углеводы:  {c_sym} {data["у"]:.0f}/{у_цель:.0f}г{c_note}')
         load = day_load(ref)
-        ffloor, fcap = fat_range(load, goals)
+        lo, hi = day_deficit_window(load, goals, mode)
+        # base + spent = deficit + eaten; the budget is that minus the
+        # window floor — the pot the fat share is taken from (§7).
+        budget = max(0.0, deficit + data['съедено'] - lo)
+        ffloor, fcap = fat_range(load, goals, budget)
         if fcap and data['ж'] > fcap * 1.2:
             fat_sym, fat_note = '⚠', f' (перебор {data["ж"] - fcap:.0f}г)'
         elif ffloor and data['ж'] < ffloor:
@@ -842,7 +880,6 @@ def main():
             fat_sym, fat_note = '✓', ''
         lines.append(f'- Жиры:      {fat_sym} {data["ж"]:.0f}г (день: {DAY_LOAD_LABEL[load]}, '
                      f'диапазон {ffloor:.0f}–{fcap:.0f}){fat_note}')
-        lo, hi = day_deficit_window(load, goals, mode)
         if mode == 'поддержание':
             bal_sym = '✓' if lo <= deficit <= hi else '⚠'
             lines.append(f'- Баланс:    {bal_sym} {deficit:.0f} ккал (поддержание, цель ~0)')

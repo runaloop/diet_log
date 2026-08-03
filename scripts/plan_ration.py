@@ -14,10 +14,10 @@ Priority stack (lexicographic, STRATEGY.md §3):
                               training load (§7a): deficit on easy days,
                               fueling on training days
   3. daily targets          → kcal ceiling (soft) + protein floor (hard)
-                              + the day's fat range (rest 1.0–1.2 / mid
-                              0.9–1.0 / high 0.8–0.9 g/kg by training load;
-                              cap hard for the plan, floor topped up with
-                              good fat) as bounds
+                              + the day's fat range (a share of the day's
+                              kcal budget by training load: rest 35–42% /
+                              mid 30–35% / high 25–30%; cap hard for the
+                              plan, floor topped up with good fat) as bounds
   4. variety                → one dish = one portion; deprioritise recent dishes
 
 Group debts and anti-repeat roll over a 7-day window ending today (STRATEGY.md
@@ -40,9 +40,9 @@ from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
 
-from summary import (GROUP_QUOTA, GROUP_ORDER, GRAM_GROUPS, DAY_FAT_RANGE,
+from summary import (GROUP_QUOTA, GROUP_ORDER, GRAM_GROUPS, DAY_FAT_SHARE,
                      DAY_LOAD_LABEL, global_mode, protein_floor,
-                     fat_range, day_load, group_servings)
+                     fat_range, day_load, day_budget, group_servings)
 from profile import parse_food_rows, load_canon
 from paths import DB_PATH, PROFILE_PATH, RATION, diary_path
 
@@ -421,14 +421,19 @@ def protein_topup(dishes, rem_prot, ration, servings, used, room, group_count,
     return rem_prot
 
 
+def plan_budget(plan, load):
+    """The day's kcal budget the fat share is taken from (STRATEGY.md §7)."""
+    return day_budget(plan['base'], plan['spent'], load, mode=plan['phase'])
+
+
 def fat_floor_topup(dishes, ration, plan, servings, used, room, group_count,
                     kcal_left, cal_cap, max_dishes, eaten, seed, load):
     """Fat floor — the bottom of the day's fat range (STRATEGY.md §7: rest
-    1.0–1.2, mid 0.9–1.0, high 0.8–0.9 g/kg): don't leave the planned day
-    below it. Good fat first (олива/орехи/рыба — the default fat, §7),
-    bad-fat dishes never close a health floor. Softer than protein: stays
-    inside the kcal ceiling and under the cap."""
-    ffloor, fcap = fat_range(load)
+    35–42% of the day's kcal budget, mid 30–35%, high 25–30%): don't leave
+    the planned day below it. Good fat first (олива/орехи/рыба — the default
+    fat, §7), bad-fat dishes never close a health floor. Softer than
+    protein: stays inside the kcal ceiling and under the cap."""
+    ffloor, fcap = fat_range(load, budget=plan_budget(plan, load))
     day_fat = plan['fat_eaten'] + sum(d['zh'] for d in ration)
     room = limit_headroom(servings)
     while day_fat < ffloor - FAT_TOL and n_dishes(ration) < max_dishes:
@@ -478,7 +483,7 @@ def build(plan, dishes, servings, eaten, seed, mode, load='low',
     # The day's fat cap (top of the load-cycled range, STRATEGY.md §7) is
     # hard for the generated plan; freed kcal flow to carbs, not to fattier
     # dishes. The bottom of the range is topped up last (fat_floor_topup).
-    fcap = fat_range(load)[1]
+    fcap = fat_range(load, budget=plan_budget(plan, load))[1]
     fat_left = max(0.0, fcap - plan['fat_eaten'])
     # One dish must not swallow the day (median-portion giants).
     cal_cap = MAX_DISH_KCAL_SHARE * plan['base'] if plan['base'] else float('inf')
@@ -571,7 +576,7 @@ def dish_label(d):
 
 
 def render(plan, ration, floor, servings, mode, load):
-    ffloor, fcap = fat_range(load)
+    ffloor, fcap = fat_range(load, budget=plan_budget(plan, load))
     print(f"Режим: {mode} | потолок ккал: {plan['kcal']:.0f} | "
           f"белок-флор: {floor:.0f}г (съедено {plan['prot_eaten']:.0f}) | "
           f"жир: {ffloor:.0f}–{fcap:.0f}г (день: {DAY_LOAD_LABEL[load]}, "
@@ -697,7 +702,7 @@ if __name__ == '__main__':
             (pin_specs if a == '--pin' else exclude_specs).append(argv[i])
         elif a == '--load':
             i += 1
-            if i >= len(argv) or argv[i] not in DAY_FAT_RANGE:
+            if i >= len(argv) or argv[i] not in DAY_FAT_SHARE:
                 sys.exit('--load: требуется low|mid|high')
             load_arg = argv[i]
         elif a.startswith('--'):
