@@ -1,4 +1,5 @@
 {
+  "effortLevel": "low",
   "permissions": {
     "allow": [
       "Edit",
