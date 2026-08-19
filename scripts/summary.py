@@ -43,6 +43,10 @@ GOALS_RE = re.compile(r'Дефицит.*?~?(\d+)-(\d+).*?ккал', re.IGNORECAS
 GOAL_PROTEIN_RE = re.compile(r'Белок.*?min\s*(\d+)', re.IGNORECASE)
 GOAL_FAT_RE = re.compile(r'Жиры.*?(\d+)-(\d+)', re.IGNORECASE)
 БАЗОВЫЙ_РАСХОД_RE = re.compile(r'Базовый расход.*?~?(\d+)', re.IGNORECASE)
+# A day the user knowingly logged only in part: its totals are not a fact
+# about eating, so every average/trend must skip it instead of reading the
+# missing food as a deficit. Marked by a blockquote line in the diary.
+PARTIAL_RE = re.compile(r'^>\s*Неполный день', re.IGNORECASE | re.MULTILINE)
 
 
 def load_goals():
@@ -288,11 +292,13 @@ def parse_day(d: date):
     total = TOTAL_RE.search(text)
     plan = PLAN_RE.search(text)
 
+    partial = bool(PARTIAL_RE.search(text))
     if not total:
-        return {'has_data': False}
+        return {'has_data': False, 'partial': partial}
 
     result = {
         'has_data': True,
+        'partial': partial,
         'к': float(total.group(1)),
         'б': float(total.group(2)),
         'ж': float(total.group(3)),
@@ -314,6 +320,13 @@ def parse_day(d: date):
     return result
 
 
+def _days(start: date, end: date):
+    d = start
+    while d <= end:
+        yield d
+        d += timedelta(days=1)
+
+
 def load_weights(start: date, end: date):
     user_md = USER
     if not user_md.exists():
@@ -331,7 +344,7 @@ def load_weights(start: date, end: date):
 
 def summarize(start: date, end: date):
     days_total = (end - start).days + 1
-    missing, no_data = [], []
+    missing, no_data, partial = [], [], []
     rows = []
     goals = load_goals()
     mode = global_mode()
@@ -346,6 +359,8 @@ def summarize(start: date, end: date):
             missing.append(d.isoformat())
         elif not data['has_data']:
             no_data.append(d.isoformat())
+        elif data.get('partial'):
+            partial.append(d.isoformat())
         else:
             rows.append(data)
             lo, hi = day_deficit_window(day_load(d), goals, mode)
@@ -368,7 +383,7 @@ def summarize(start: date, end: date):
     return dict(
         start=start, end=end,
         days_total=days_total, n=n, coverage=coverage, status=status,
-        missing=missing, no_data=no_data,
+        missing=missing, no_data=no_data, partial=partial,
         съедено=total('съедено'), потрачено=total('потрачено'), дефицит=total('дефицит'),
         avg_съедено=avg('съедено'), avg_дефицит=avg('дефицит'),
         б=total('б'), ж=total('ж'), у=total('у'), клет=total('клет'),
@@ -459,6 +474,8 @@ def fmt(r, label, show_week=False):
 
     lines.append(f'- Пропущенные дни: {", ".join(r["missing"]) or "нет"}')
     lines.append(f'- Дни без данных: {", ".join(r["no_data"]) or "нет"}')
+    if r.get('partial'):
+        lines.append(f'- Неполные дни (не в средних): {", ".join(r["partial"])}')
 
     w = r['weights']
     if len(w) >= 2:
@@ -558,6 +575,8 @@ def weektrend(ref: date, with_groups: bool = True):
                 wlo, whi = lo * 7, hi * 7
                 sym = '✓' if wlo <= projected <= whi else ('✗' if projected < 0 else '⚠')
                 lines.append(f'- Прогноз недельного дефицита при тренде: {projected:.0f} ккал (окно {wlo:.0f}–{whi:.0f}) {sym}')
+        if r['partial']:
+            lines.append(f'- Неполные дни (не в тренде): {", ".join(r["partial"])}')
 
     if with_groups:
         lines.append('')
@@ -650,6 +669,11 @@ def group_remainder_lines(ref: date):
             out.append(f'- {g+":":<13} ✗ {got:.1f}/{limit} — перебор {got-limit:.1f}')
         else:
             out.append(f'- {g+":":<13} ✓ {got:.1f}/{limit} (запас {limit-got:.1f})')
+
+    partial = [d.isoformat() for d in _days(win_start, ref)
+               if (parse_day(d) or {}).get('partial')]
+    if partial:
+        out += ['', f'- В окне неполные дни ({", ".join(partial)}) — долг завышен']
 
     if unmatched:
         uniq = sorted(set(unmatched))
@@ -839,6 +863,12 @@ def main():
         lines = [
             f'## Итоги дня {ref}',
             '',
+        ]
+        if data.get('partial'):
+            lines.append('> Неполный день — часть еды не залогирована, '
+                         'выводы по цифрам не делать (в средних не учитывается)')
+            lines.append('')
+        lines += [
             f'- Съедено: {data["съедено"]:.0f} ккал',
             f'- Потрачено тренировками: {data["потрачено"]:.0f} ккал',
             f'- Дефицит: {deficit:.0f} ккал',
