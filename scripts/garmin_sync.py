@@ -397,6 +397,25 @@ def weight(date, raw=False):
     source = res.get("sourceType") or "?"
     print(f"weight: {kg} kg | date: {when} | source: {source}")
 
+    fat = res.get("bodyFat")
+    muscle_g = res.get("muscleMass")
+    bone_g = res.get("boneMass")
+    water = res.get("bodyWater")
+    bmi = res.get("bmi")
+    extras = []
+    if fat is not None:
+        extras.append(f"fat: {round(fat, 1)}%")
+        if muscle_g:
+            extras.append(f"muscle: {round(muscle_g / 1000, 1)} kg")
+        if bone_g:
+            extras.append(f"bone: {round(bone_g / 1000, 2)} kg")
+        if water is not None:
+            extras.append(f"water: {round(water, 1)}%")
+        if bmi is not None:
+            extras.append(f"bmi: {round(bmi, 1)}")
+    if extras:
+        print("body: " + " | ".join(extras))
+
 
 def main():
     args = [a for a in sys.argv[1:] if a != "--json"]
