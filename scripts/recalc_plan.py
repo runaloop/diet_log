@@ -81,9 +81,9 @@ def compute(lines, ref, base=None, load=None, goals=None, mode=None):
     lo, hi = day_deficit_window(load, goals, mode)
     deficit = base + spent - eaten
     can_eat = base + spent - lo - eaten
-    prot_t = protein_floor(goals)
+    prot_t = protein_floor(goals, ref)
     budget = day_budget(base, spent, load, goals, mode)
-    ffloor, fcap = fat_range(load, goals, budget)
+    ffloor, fcap = fat_range(load, goals, budget, ref)
     carb_t = max(0, round((base + spent - lo - prot_t * 4 - ffloor * 9) / 4))
     carb_left = max(0, carb_t - round(food['У']))
     diary_mode = MODE_RE.search(text)

@@ -111,13 +111,14 @@ def global_mode(cycle=None):
 PROTEIN_PER_KG = 1.8
 
 
-def protein_floor(goals=None):
+def protein_floor(goals=None, ref=None):
     """Daily protein floor in grams: weight × 1.8 (STRATEGY.md §8).
 
-    Weight comes from the latest user.md entry; falls back to the fixed
-    goals.md value when no weight is on record.
+    Weight comes from the latest user.md entry (up to `ref` when given, so
+    a past day keeps the weight it was planned with); falls back to the
+    fixed goals.md value when no weight is on record.
     """
-    lw = load_last_weight()
+    lw = load_last_weight(ref)
     if lw is None:
         return (goals or load_goals()).get('protein', 0)
     return round(lw[1] * PROTEIN_PER_KG)
@@ -151,7 +152,7 @@ FAT_BAD_SHARE_CAP = 0.15
 FAT_GOOD_SHARE_TARGET = 0.40
 
 
-def fat_range(load=None, goals=None, budget=None):
+def fat_range(load=None, goals=None, budget=None, ref=None):
     """(floor_g, cap_g) of the day's fat range (STRATEGY.md §7).
 
     load ∈ {'low','mid','high'} — the day's training load (see day_load);
@@ -159,9 +160,10 @@ def fat_range(load=None, goals=None, budget=None):
     budget (see day_budget) — for a period, its per-day average. Without a
     budget the range falls back to the legacy g/kg band, since a share of
     an unknown budget is unknown. Weight comes from the latest user.md
-    entry; with no weight on record both bounds fall back to goals.md.
+    entry (up to `ref` when given); with no weight on record both bounds
+    fall back to goals.md.
     """
-    lw = load_last_weight()
+    lw = load_last_weight(ref)
     if budget:
         share = DAY_FAT_SHARE.get(load, FAT_SHARE_ALL)
         floor, cap = budget * share[0] / 9, budget * share[1] / 9
@@ -553,17 +555,20 @@ def fmt(r, label, show_week=False):
     return '\n'.join(lines)
 
 
-def load_last_weight():
-    """Return (date, kg) of the last weight entry in user.md, or None."""
+def load_last_weight(ref=None):
+    """(date, kg) of the last weight entry in user.md — the last one not
+    after `ref` when given — or None."""
     user_md = USER
     if not user_md.exists():
         return None
     entries = []
     for m in WEIGHT_RE.finditer(user_md.read_text()):
         try:
-            entries.append((date.fromisoformat(m.group(1)), float(m.group(2))))
+            d = date.fromisoformat(m.group(1))
         except ValueError:
-            pass
+            continue
+        if ref is None or d <= ref:
+            entries.append((d, float(m.group(2))))
     return max(entries, key=lambda x: x[0]) if entries else None
 
 

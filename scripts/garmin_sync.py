@@ -21,10 +21,25 @@ Usage:
   python3 scripts/garmin_sync.py activities [YYYY-MM-DD] # workouts of the day
   python3 scripts/garmin_sync.py base [YYYY-MM-DD]       # 4-week avg resting kcal
   python3 scripts/garmin_sync.py weight [YYYY-MM-DD]     # latest weigh-in up to date
-  (any command accepts --json for the raw API response)
+  python3 scripts/garmin_sync.py apply [YYYY-MM-DD] [--back N] [--base] [--dry-run]
+                                                         # sync the diary with the watch
+  (fetch/activities/base/weight accept --json for the raw API response)
+
+`apply` is the whole «синк гармин» in one call: logs the day's workouts
+that are not in the diary yet (zone in the name, split rows when a Z1–2
+and a Z3+ part both carry ≥150 kcal, `other` skipped), writes or updates
+the NEAT top-up row «Прочая активность (Garmin)» (skipped when marked
+«ручной фикс» / «не синкать», updated only when off by >20 kcal),
+appends a new weigh-in with body composition to config/user.md, and with
+--base compares the 4-week resting average with the constant there
+(>2% off → constant and effective base updated). --back N repeats the
+workout/NEAT sync for the N previous days. No token file → exits 0
+silently (a machine without Garmin). --fixture FILE feeds the API
+answers from JSON instead (tests, offline).
 """
 
 import base64
+import re
 import getpass
 import http.cookiejar
 import json
@@ -311,14 +326,39 @@ def _zone_kcal(a, active_kcal):
     return {z: active_kcal * t / total for z, t in times if t > 0}
 
 
-def activities(date, raw=False):
-    opener, tokens = _session()
-    acts = api_get(
+def get_activities(opener, tokens, date):
+    return api_get(
         opener, tokens,
         "/activitylist-service/activities/search/activities",
         params={"startDate": date, "endDate": date,
                 "start": "0", "limit": "50"},
-    )
+    ) or []
+
+
+def get_weight(opener, tokens, date):
+    return api_get(
+        opener, tokens, "/weight-service/weight/latest",
+        params={"date": date, "ignorePriority": "true"},
+    ) or {}
+
+
+def base_days(opener, tokens, date):
+    """[(day, bmr)] for the 28 days before `date`."""
+    days = []
+    for i in range(1, 29):
+        d = time.strftime(
+            "%Y-%m-%d",
+            time.localtime(time.mktime(time.strptime(date, "%Y-%m-%d")) - i * 86400),
+        )
+        bmr = get_summary(opener, tokens, d).get("bmrKilocalories")
+        if bmr:
+            days.append((d, bmr))
+    return days
+
+
+def activities(date, raw=False):
+    opener, tokens = _session()
+    acts = get_activities(opener, tokens, date)
     if raw:
         print(json.dumps(acts, indent=2, ensure_ascii=False))
         return
@@ -359,15 +399,7 @@ def activities(date, raw=False):
 
 def base(date, raw=False):
     opener, tokens = _session()
-    days = []
-    for i in range(1, 29):
-        d = time.strftime(
-            "%Y-%m-%d",
-            time.localtime(time.mktime(time.strptime(date, "%Y-%m-%d")) - i * 86400),
-        )
-        bmr = get_summary(opener, tokens, d).get("bmrKilocalories")
-        if bmr:
-            days.append((d, bmr))
+    days = base_days(opener, tokens, date)
     if not days:
         raise GarminError("no BMR data in the last 28 days")
     avg = round(sum(b for _, b in days) / len(days))
@@ -381,10 +413,7 @@ def base(date, raw=False):
 
 def weight(date, raw=False):
     opener, tokens = _session()
-    res = api_get(
-        opener, tokens, "/weight-service/weight/latest",
-        params={"date": date, "ignorePriority": "true"},
-    )
+    res = get_weight(opener, tokens, date)
     if raw:
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return
@@ -417,6 +446,290 @@ def weight(date, raw=False):
         print("body: " + " | ".join(extras))
 
 
+
+# ---------------------------------------------------------------- apply --
+# The whole «синк гармин» as one call (AGENTS.md «Синхронизация с Garmin»).
+
+TYPE_RU = {
+    "walking": "Прогулка", "hiking": "Хайкинг",
+    "running": "Бег", "trail_running": "Бег", "treadmill_running": "Бег (дорожка)",
+    "cycling": "Вело", "indoor_cycling": "Вело", "virtual_ride": "Вело",
+    "road_biking": "Вело", "mountain_biking": "Вело", "gravel_cycling": "Вело",
+    "lap_swimming": "Плавание", "open_water_swimming": "Плавание",
+    "strength_training": "Силовая", "elliptical": "Эллипс",
+    "indoor_rowing": "Гребля", "rowing": "Гребля", "indoor_cardio": "Кардио",
+    "hiit": "Интервалы", "yoga": "Йога", "pilates": "Пилатес",
+}
+SKIP_TYPES = {"other"}                       # contrast shower & co: NEAT covers them
+NO_ZONE_TYPES = {"walking", "hiking", "strength_training", "yoga", "pilates"}
+SPLIT_MIN_KCAL = 150                         # Z1–2 part and Z3+ part both ≥ this → two rows
+NEAT_NAME = "Прочая активность (Garmin)"
+NEAT_MATCH = "Прочая активность"           # the row may carry a suffix («…, ручной фикс»)
+NEAT_TIME = "23:59"
+NEAT_TOLERANCE = 20                          # kcal; smaller drift leaves the row alone
+MANUAL_RE = re.compile(r"ручной фикс|не синкать", re.IGNORECASE)
+BASE_DRIFT = 0.02
+ROW_RE = re.compile(r"^\|\s*(\d{2}:\d{2})\s*\|\s*([^|]*?)\s*\|\s*(-?[\d.]+)\s*\|")
+WEIGHT_ROW_RE = re.compile(
+    r"^\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*([\d.]+)\s*\|\s*([\d.]*)\s*\|\s*([\d.]*)\s*\|\s*([\d.]*)\s*\|")
+BASE_LINE_RE = re.compile(
+    r"^(- Базовый расход \(Garmin API, 4-нед среднее покоя, )(\d{4}-\d{2}-\d{2})(\): )(\d+)( ккал.*)$",
+    re.MULTILINE)
+CORRECTION_RE = re.compile(r"Поправка базового расхода:\s*([−-]?\d+)")
+EFFECTIVE_RE = re.compile(r"(\*\*Эффективный базовый расход\*\* = сырой \+ поправка = )(\d+)( ккал)")
+
+
+class Live:
+    """API-backed data source for apply()."""
+
+    def __init__(self):
+        self.opener, self.tokens = _session()
+
+    def summary(self, d):
+        return get_summary(self.opener, self.tokens, d)
+
+    def activities(self, d):
+        return get_activities(self.opener, self.tokens, d)
+
+    def weight(self, d):
+        return get_weight(self.opener, self.tokens, d)
+
+    def base_avg(self, d):
+        days = base_days(self.opener, self.tokens, d)
+        return round(sum(b for _, b in days) / len(days)) if days else None
+
+
+class Fixture:
+    """JSON-backed data source: {"summary": {...}, "activities": [...],
+    "weight": {...}, "base": N} (per-day keys may be dicts keyed by date)."""
+
+    def __init__(self, path):
+        self.data = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    def _pick(self, key, d, default):
+        v = self.data.get(key, default)
+        return v.get(d, default) if isinstance(v, dict) and d in v else v
+
+    def summary(self, d):
+        return self._pick("summary", d, {})
+
+    def activities(self, d):
+        return self._pick("activities", d, [])
+
+    def weight(self, d):
+        return self._pick("weight", d, {})
+
+    def base_avg(self, d):
+        return self.data.get("base")
+
+
+def workout_rows(a):
+    """Diary rows for one Garmin activity: [(name, kcal)]; [] when skipped."""
+    type_key = (a.get("activityType") or {}).get("typeKey", "?")
+    if type_key in SKIP_TYPES:
+        return []
+    kcal = round((a.get("calories") or 0) - (a.get("bmrCalories") or 0))
+    if kcal <= 0:
+        return []
+    mins = round((a.get("duration") or 0) / 60)
+    ru = TYPE_RU.get(type_key) or (a.get("activityName") or type_key)
+    if type_key in NO_ZONE_TYPES:
+        return [(f"{ru} {mins} мин", kcal)]
+    zones = _zone_kcal(a, kcal)
+    if not zones:
+        return [(f"{ru} Z2 {mins} мин", kcal)]   # no HR data: unknown zone counts as Z2
+    low = zones.get(1, 0.0) + zones.get(2, 0.0)
+    high = sum(v for z, v in zones.items() if z >= 3)
+    if low >= SPLIT_MIN_KCAL and high >= SPLIT_MIN_KCAL:
+        lo_z = max((z for z in zones if z <= 2), key=zones.get)
+        hi_z = max((z for z in zones if z >= 3), key=zones.get)
+        lo_min = round(mins * low / (low + high))
+        return [(f"{ru} Z{lo_z} (часть) {lo_min} мин", round(low)),
+                (f"{ru} Z{hi_z} (часть) {mins - lo_min} мин", round(high))]
+    low_share = low / (low + high) if (low + high) else 0.0
+    if low_share >= 0.90:
+        dom = max((z for z in zones if z <= 2), key=zones.get)
+        label = f"Z{dom}"
+    else:
+        hi_dom = max((z for z in zones if z >= 3), key=zones.get, default=3)
+        label = f"интервалы Z{hi_dom}"
+    return [(f"{ru} {label} {mins} мин", kcal)]
+
+
+def training_rows(lines):
+    """[(index, time, name, kcal>0)] for the diary's training rows (К<0)."""
+    out = []
+    for i, l in enumerate(lines):
+        m = ROW_RE.match(l.strip())
+        if m and float(m.group(3)) < 0:
+            out.append((i, m.group(1), m.group(2), -float(m.group(3))))
+    return out
+
+
+def sync_diary(d, src, path, dry_run):
+    """Workouts + NEAT row for one day. Returns (report lines, changed)."""
+    import recalc_plan
+    from format_tables import format_file
+    from log import activity_row, insert_rows
+    from validate_diary import validate
+
+    day = d.isoformat()
+    lines = path.read_text(encoding="utf-8").rstrip("\n").split("\n")
+    if not any("Продукт/Активность" in l for l in lines):
+        lines = recalc_plan.apply(lines, recalc_plan.compute(lines, d))
+    report, changed = [], False
+
+    logged_times = {t for _, t, n, _ in training_rows(lines) if NEAT_MATCH not in n}
+    new_rows = []
+    for a in sorted(src.activities(day), key=lambda a: a.get("startTimeLocal", "")):
+        start = (a.get("startTimeLocal") or "")[11:16]
+        if start in logged_times:
+            continue
+        rows = workout_rows(a)
+        if not rows:
+            continue
+        for name, kcal in rows:
+            report.append(f"{day}: + {name} −{kcal} ({start})")
+        new_rows.append((start, [activity_row(start, n, k) for n, k in rows]))
+    for start, rows in new_rows:
+        lines = insert_rows(lines, rows, start)
+        changed = True
+
+    active = (src.summary(day) or {}).get("activeKilocalories")
+    if active is not None:
+        rows = training_rows(lines)
+        neat = [(i, n, k) for i, _, n, k in rows if NEAT_MATCH in n]
+        spent = sum(k for _, _, n, k in rows if NEAT_MATCH not in n)
+        diff = round(active - spent)
+        if neat:
+            i, name, current = neat[0]
+            if MANUAL_RE.search(name):
+                report.append(f"{day}: {name} −{current:.0f} — ручной фикс, не трогаю")
+            elif abs(diff - current) > NEAT_TOLERANCE:
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                cells[2] = f"-{diff}"
+                lines[i] = "| " + " | ".join(cells) + " |"
+                report.append(f"{day}: {NEAT_NAME} −{diff} (было −{current:.0f})")
+                changed = True
+        elif diff > 0:
+            lines = insert_rows(lines, [activity_row(NEAT_TIME, NEAT_NAME, diff)], NEAT_TIME)
+            report.append(f"{day}: + {NEAT_NAME} −{diff}")
+            changed = True
+
+    if changed and not dry_run:
+        c = recalc_plan.compute(lines, d)
+        lines = recalc_plan.apply(lines, c)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        format_file(path)
+        errs = validate(path)
+        report += [f"   ✗ {e}" for e in errs]
+    return report, changed, lines
+
+
+def sync_weight(d, src, user_path, dry_run):
+    """Append a new weigh-in (with body composition) to the user.md table."""
+    res = src.weight(d.isoformat())
+    grams = (res or {}).get("weight")
+    if not grams:
+        return []
+    kg = round(grams / 1000, 1)
+    when = res.get("calendarDate") or d.isoformat()
+    fat = res.get("bodyFat")
+    muscle = round(res["muscleMass"] / 1000, 1) if res.get("muscleMass") else None
+    bone = round(res["boneMass"] / 1000, 2) if res.get("boneMass") else None
+    text = user_path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    rows = [(i, m) for i, l in enumerate(lines) if (m := WEIGHT_ROW_RE.match(l))]
+    if rows:
+        last_i, last = max(rows, key=lambda r: r[1].group(1))
+        last_date, last_kg = last.group(1), float(last.group(2))
+        last_fat = float(last.group(3)) if last.group(3) else None
+        last_muscle = float(last.group(4)) if last.group(4) else None
+        if when <= last_date:
+            return []
+        same = kg == last_kg
+        moved = ((fat is not None and last_fat is not None and abs(fat - last_fat) >= 0.5) or
+                 (muscle is not None and last_muscle is not None and abs(muscle - last_muscle) >= 0.5))
+        if same and not moved:
+            return []
+        insert_at = max(i for i, _ in rows) + 1
+    else:
+        insert_at = len(lines)
+    fmt = lambda v, nd: ("" if v is None else f"{v:.{nd}f}")
+    row = f"| {when} | {kg} | {fmt(fat, 1)} | {fmt(muscle, 1)} | {fmt(bone, 2)} | Garmin |"
+    body = " · ".join(s for s in (f"жир {fat:.1f}%" if fat is not None else "",
+                                   f"мышцы {muscle}" if muscle else "",
+                                   f"кость {bone}" if bone else "") if s)
+    if not dry_run:
+        lines.insert(insert_at, row)
+        user_path.write_text("\n".join(lines), encoding="utf-8")
+        from format_tables import format_file
+        format_file(user_path)
+    return [f"вес: {kg} кг ({when}) → {user_path.name}" + (f"; {body}" if body else "")]
+
+
+def sync_base(d, src, user_path, dry_run):
+    """Compare the 4-week resting average with the user.md constant."""
+    avg = src.base_avg(d.isoformat())
+    if not avg:
+        return ["база: Garmin не дал данных за 28 дней"]
+    text = user_path.read_text(encoding="utf-8")
+    m = BASE_LINE_RE.search(text)
+    if not m:
+        return [f"база: Garmin {avg} ккал; строка константы в {user_path.name} не найдена — сверить руками"]
+    raw = int(m.group(4))
+    drift = (avg - raw) / raw
+    if abs(drift) <= BASE_DRIFT:
+        return [f"база: Garmin {avg} vs константа {raw} ({drift:+.1%}) — без изменений"]
+    corr = CORRECTION_RE.search(text)
+    correction = int(corr.group(1).replace("−", "-")) if corr else 0
+    effective = avg + correction
+    if not dry_run:
+        text = BASE_LINE_RE.sub(lambda mm: f"{mm.group(1)}{d.isoformat()}{mm.group(3)}{avg}{mm.group(5)}", text, count=1)
+        text = EFFECTIVE_RE.sub(lambda mm: f"{mm.group(1)}{effective}{mm.group(3)}", text, count=1)
+        user_path.write_text(text, encoding="utf-8")
+    return [f"база: Garmin {avg} vs константа {raw} ({drift:+.1%}) → константа {avg}, "
+            f"эффективный {effective} (поправка {correction:+d}); новый дневник возьмёт его из {user_path.name}"]
+
+
+def apply(date_s, back=0, with_base=False, dry_run=False, fixture=None,
+          diary=None, user=None):
+    from datetime import date as _date, timedelta
+    import recalc_plan
+    from paths import USER, diary_path
+
+    if fixture:
+        src = Fixture(fixture)
+    else:
+        if not TOKEN_PATH.exists():
+            return 0                       # a machine without Garmin: stay silent
+        src = Live()
+    user_path = Path(user) if user else USER
+    ref = _date.fromisoformat(date_s)
+    days = [ref] if diary else [ref - timedelta(days=i) for i in range(back, -1, -1)]
+    report, last_lines = [], None
+    for d in days:
+        path = Path(diary).resolve() if diary else diary_path(d)
+        if not path.exists():
+            report.append(f"{d}: дневника нет — пропуск")
+            continue
+        rep, changed, lines = sync_diary(d, src, path, dry_run)
+        report += rep or [f"{d}: тренировки и докрутка на месте"]
+        if d == ref:
+            last_lines = lines
+    report += sync_weight(ref, src, user_path, dry_run)
+    if with_base:
+        report += sync_base(ref, src, user_path, dry_run)
+    if dry_run:
+        report = ["(dry-run, ничего не записано)"] + report
+    print("\n".join(report))
+    if last_lines is not None and not dry_run:
+        c = recalc_plan.compute(last_lines, ref)
+        print()
+        print("\n".join(recalc_plan.status_block(c, ref, last_lines)))
+    return 0
+
+
 def main():
     args = [a for a in sys.argv[1:] if a != "--json"]
     raw = "--json" in sys.argv
@@ -427,6 +740,30 @@ def main():
     try:
         if cmd == "login":
             login()
+        elif cmd == "apply":
+            opts, pos = {}, []
+            rest = args[1:]
+            i = 0
+            while i < len(rest):
+                a = rest[i]
+                if a in ("--back", "--fixture", "--diary", "--user"):
+                    i += 1
+                    if i >= len(rest):
+                        raise GarminError(f"{a}: требуется значение")
+                    opts[a[2:]] = rest[i]
+                elif a in ("--base", "--dry-run"):
+                    opts[a[2:].replace("-", "_")] = True
+                elif a.startswith("--"):
+                    raise GarminError(f"неизвестный флаг {a}")
+                else:
+                    pos.append(a)
+                i += 1
+            date = pos[0] if pos else time.strftime("%Y-%m-%d")
+            sys.exit(apply(date, back=int(opts.get("back", 0)),
+                           with_base=opts.get("base", False),
+                           dry_run=opts.get("dry_run", False),
+                           fixture=opts.get("fixture"), diary=opts.get("diary"),
+                           user=opts.get("user")))
         elif cmd in ("fetch", "activities", "base", "weight"):
             date = args[1] if len(args) > 1 else time.strftime("%Y-%m-%d")
             {"fetch": fetch, "activities": activities,
