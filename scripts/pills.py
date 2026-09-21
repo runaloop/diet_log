@@ -7,19 +7,89 @@ day, gitignored alongside pills.md) and reports adherence from it.
 
     python3 scripts/pills.py sync [date]     # upsert today's snapshot
     python3 scripts/pills.py history [days]  # last N days (default 30)
+    python3 scripts/pills.py build [date] [--force]
+                                             # write pills.md for the day from
+                                             # config/medications.md
 
 `sync` is idempotent: re-running it replaces that date's line rather
 than appending a duplicate, so it is safe to call after every check-off
 and again right before a new day overwrites pills.md.
+
+`build` evaluates each medications.md row's period for the day
+(`бессрочно` · `YYYY-MM-DD..YYYY-MM-DD` · `YYYY-MM-DD..бессрочно` ·
+weekday list `пн,ср,пт`; note `через день` = every second day from the
+period start) and writes the checklist (all 🔲). Nothing due → no file.
+A same-day pills.md that already has check marks is left alone unless
+--force.
 """
 import json
+import re
 import sys
 from datetime import date, timedelta
 
-from paths import PILLS, PILLS_HISTORY
+from paths import PILLS, PILLS_HISTORY, MEDICATIONS
+from format_tables import format_file
 
 TAKEN_MARK = '✅'
 HEADER_CELLS = {'·', 'препарат', 'доза', 'приём', 'принято'}
+WEEKDAYS = {'пн': 0, 'вт': 1, 'ср': 2, 'чт': 3, 'пт': 4, 'сб': 5, 'вс': 6}
+PERIOD_RANGE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2}|бессрочно)$')
+PILLS_HEADER = ['| · | Препарат | Доза | Приём | Принято |',
+                '|---|----------|------|-------|---------|']
+
+
+def parse_medications(path=MEDICATIONS):
+    """Rows of config/medications.md: [{'name','dose','slot','period','note'}]."""
+    rows = []
+    for line in path.read_text(encoding='utf-8').split('\n'):
+        s = line.strip()
+        if not s.startswith('|'):
+            continue
+        cells = [c.strip() for c in s.strip('|').split('|')]
+        if len(cells) < 4 or cells[0].lower() == 'препарат' or set(cells[0]) <= {'-', ' '}:
+            continue
+        rows.append({'name': cells[0], 'dose': cells[1], 'slot': cells[2],
+                     'period': cells[3], 'note': cells[4] if len(cells) > 4 else ''})
+    return rows
+
+
+def due(row, day):
+    """True if the row's period covers `day` (see module docstring)."""
+    period = row['period'].strip().lower()
+    start = None
+    if period == 'бессрочно':
+        ok = True
+    elif (m := PERIOD_RANGE_RE.match(period)):
+        start = date.fromisoformat(m.group(1))
+        end = None if m.group(2) == 'бессрочно' else date.fromisoformat(m.group(2))
+        ok = start <= day and (end is None or day <= end)
+    else:
+        days = {WEEKDAYS.get(t.strip()) for t in period.split(',')}
+        if None in days:
+            raise ValueError(f'период не распознан: {row["period"]!r} ({row["name"]})')
+        ok = day.weekday() in days
+    if ok and 'через день' in row['note'].lower() and start is not None:
+        ok = (day - start).days % 2 == 0
+    return ok
+
+
+def build(day=None, force=False):
+    """Write pills.md for `day`; (day, rows written) or (day, 0) when nothing is due."""
+    day = day or date.today()
+    if not MEDICATIONS.exists():
+        return day, 0
+    rows = [r for r in parse_medications() if due(r, day)]
+    if not rows:
+        return day, 0
+    if PILLS.exists() and not force:
+        cur_day, items = parse_pills()
+        if cur_day == day and any(i['taken'] for i in items):
+            sys.exit(f'pills.md на {day} уже с отметками — не трогаю (--force чтобы перезаписать)')
+    lines = [f'# Таблетки {day.isoformat()}', '', *PILLS_HEADER]
+    lines += [f'| 🔲 | {r["name"]} | {r["dose"]} | {r["slot"]} | |' for r in rows]
+    PILLS.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    format_file(PILLS)
+    return day, len(rows)
 
 
 def parse_pills(path=PILLS):
@@ -132,6 +202,14 @@ def main(argv):
     elif cmd == 'history':
         days = int(argv[2]) if len(argv) > 2 else 30
         print(history(days))
+    elif cmd == 'build':
+        pos = [a for a in argv[2:] if not a.startswith('--')]
+        day = date.fromisoformat(pos[0]) if pos else None
+        day, n = build(day, force='--force' in argv)
+        if n == 0:
+            print(f'на {day} приёмов нет — pills.md не создаю')
+        else:
+            print(f'✓ pills.md на {day} ({n} строк)')
     else:
         print(__doc__)
         sys.exit(1)
