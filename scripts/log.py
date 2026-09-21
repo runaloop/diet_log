@@ -211,7 +211,7 @@ def main(argv):
 
     rows = []
     if o['macros']:
-        name, grams = split_spec(o['specs'][0].lstrip('!').strip())
+        name, grams = split_spec(o['specs'][0].strip())
         label = f'{name} {fmt_g(grams)}г' if grams else name
         m = {k: o['macros'].get(k, 0.0) for k in MACRO_KEYS}
         rows.append(food_row(t, label, m))
