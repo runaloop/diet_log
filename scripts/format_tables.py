@@ -33,7 +33,12 @@ def is_separator(cells):
 def format_file(path):
     with open(path, encoding='utf-8') as f:
         content = f.read()
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(format_text(content))
 
+
+def format_text(content):
+    """`content` with every markdown table column-aligned."""
     trailing_newline = content.endswith('\n')
     lines = content.rstrip('\n').split('\n')
 
@@ -67,9 +72,7 @@ def format_file(path):
     result = '\n'.join(out)
     if trailing_newline:
         result += '\n'
-
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(result)
+    return result
 
 
 if __name__ == '__main__':

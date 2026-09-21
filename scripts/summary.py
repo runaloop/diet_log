@@ -183,15 +183,21 @@ LOAD_IGNORE_RE = re.compile(r'прочая активность|прогулк|�
 CARRYOVER_KCAL = 900  # yesterday's Z3+ kcal above this → today at least mid
 
 
-def _day_signals(ref: date):
-    """(raw_load, hi_kcal) for the diary of `ref`, no carryover applied."""
+def _day_signals(ref: date, lines=None):
+    """(raw_load, hi_kcal) for the diary of `ref`, no carryover applied.
+
+    `lines` — the diary text already in hand (an unsaved copy); otherwise
+    the file on disk is read.
+    """
     from profile import parse_activity_rows
 
-    path = diary_path(ref)
-    if not path.exists():
-        return 'low', 0.0
+    if lines is None:
+        path = diary_path(ref)
+        if not path.exists():
+            return 'low', 0.0
+        lines = path.read_text().split('\n')
     hi = mid = 0.0
-    for name, kcal in parse_activity_rows(path.read_text().split('\n')):
+    for name, kcal in parse_activity_rows(lines):
         if LOAD_IGNORE_RE.search(name):
             continue
         m = ZONE_RE.search(name)
@@ -207,16 +213,16 @@ def _day_signals(ref: date):
     return 'low', hi
 
 
-def day_load(ref: date):
+def day_load(ref: date, lines=None):
     """Classify the day's training load (STRATEGY.md §7/§7a).
 
     'high' — ≥300 kcal in Z3+/strength/intervals; 'mid' — ≥200 kcal of
     training counting Z2 and unknown-zone workouts (the agent asks the zone
     anyway); 'low' — rest, walks, NEAT only. A rest day after >900 kcal of
     Z3+ work is bumped to 'mid' (recovery carryover) — for the whole day:
-    fat range and deficit window alike.
+    fat range and deficit window alike. `lines` — see _day_signals.
     """
-    load, _ = _day_signals(ref)
+    load, _ = _day_signals(ref, lines)
     if load == 'low':
         _, hi_prev = _day_signals(ref - timedelta(days=1))
         if hi_prev > CARRYOVER_KCAL:
@@ -271,6 +277,65 @@ def status(actual, target, invert=False):
     if invert:
         return '✓' if actual >= target else ('⚠' if actual > 0 else '✗')
     return '✓' if pct >= 1.0 else ('⚠' if pct >= 0.5 else '✗')
+
+
+def day_status_lines(ref, eaten, spent, deficit, prot, fat, carbs, carb_target,
+                     load=None, goals=None, mode=None, lines=None):
+    """One day's macro/deficit status lines — the chat status block.
+
+    Returns {'белок', 'углеводы', 'жиры', 'дефицит'} → 'Label:  ✓ …' (no
+    bullet), plus 'жиры_вне' (bool): fat outside the day's range. The chat
+    block prints the fat line only then; `summary.py day` always prints it.
+    In maintenance mode 'дефицит' holds the «Баланс:» line.
+    """
+    goals = goals or load_goals()
+    mode = mode or global_mode()
+    load = load or day_load(ref, lines)
+    out = {}
+    target_protein = protein_floor(goals)
+    if target_protein:
+        p_sym = status(prot, target_protein)
+        p_note = f' (недобор {target_protein - prot:.0f}г)' if prot < target_protein else ''
+        out['белок'] = f'Белок:     {p_sym} {prot:.0f}/{target_protein}г{p_note}'
+    if carb_target:
+        delta = carbs - carb_target
+        if delta > carb_target * 0.05:
+            c_sym, c_note = '⚠', f' (перебор {delta:.0f}г)'
+        elif delta < 0:
+            c_sym, c_note = ('⚠' if carbs >= carb_target * 0.5 else '✗'), f' (недобор {-delta:.0f}г)'
+        else:
+            c_sym, c_note = '✓', ''
+        out['углеводы'] = f'Углеводы:  {c_sym} {carbs:.0f}/{carb_target:.0f}г{c_note}'
+    lo, hi = day_deficit_window(load, goals, mode)
+    # base + spent = deficit + eaten; the budget is that minus the window
+    # floor — the pot the fat share is taken from (§7).
+    budget = max(0.0, deficit + eaten - lo)
+    ffloor, fcap = fat_range(load, goals, budget)
+    if fcap and fat > fcap * 1.2:
+        fat_sym, fat_note, outside = '⚠', f' (перебор {fat - fcap:.0f}г)', True
+    elif ffloor and fat < ffloor:
+        fat_sym, fat_note, outside = '⚠', f' (ниже минимума на {ffloor - fat:.0f}г)', True
+    else:
+        fat_sym, fat_note, outside = '✓', '', False
+    out['жиры'] = (f'Жиры:      {fat_sym} {fat:.0f}г (день: {DAY_LOAD_LABEL[load]}, '
+                   f'диапазон {ffloor:.0f}–{fcap:.0f}){fat_note}')
+    out['жиры_вне'] = outside
+    if mode == 'поддержание':
+        bal_sym = '✓' if lo <= deficit <= hi else '⚠'
+        out['дефицит'] = f'Баланс:    {bal_sym} {deficit:.0f} ккал (поддержание, цель ~0)'
+    else:
+        if deficit < lo:
+            d_sym = '✗' if deficit < 0 else '⚠'
+            d_note = f' (переедание: ниже окна на {lo - deficit:.0f})'
+        elif deficit <= hi:
+            d_sym, d_note = '✓', ''
+        elif load == 'low':
+            d_sym, d_note = '✓', f' (жёстче цели на {deficit - hi:.0f})'
+        else:
+            d_sym, d_note = '⚠', f' (недоедание: выше окна на {deficit - hi:.0f} — добрать углей)'
+        out['дефицит'] = (f'Дефицит:   {d_sym} {deficit:.0f} ккал (день: {DAY_LOAD_LABEL[load]}, '
+                          f'окно {lo}–{hi}){d_note}')
+    return out
 
 
 PLAN_RE = re.compile(
@@ -882,48 +947,10 @@ def main():
                          f'{sign}{abs(projected):.2f} кг → расчётный вес ~{last[1] - projected:.1f}')
         lines.append('')
         lines.append('### Макросы')
-        if target_protein:
-            p_sym = status(data['б'], target_protein)
-            p_note = f' (недобор {target_protein - data["б"]:.0f}г)' if data['б'] < target_protein else ''
-            lines.append(f'- Белок:     {p_sym} {data["б"]:.0f}/{target_protein}г{p_note}')
-        у_цель = data.get('у_цель', 0)
-        if у_цель:
-            delta = data['у'] - у_цель
-            if delta > у_цель * 0.05:
-                c_sym, c_note = '⚠', f' (перебор {delta:.0f}г)'
-            elif delta < 0:
-                c_sym, c_note = ('⚠' if data['у'] >= у_цель * 0.5 else '✗'), f' (недобор {-delta:.0f}г)'
-            else:
-                c_sym, c_note = '✓', ''
-            lines.append(f'- Углеводы:  {c_sym} {data["у"]:.0f}/{у_цель:.0f}г{c_note}')
-        load = day_load(ref)
-        lo, hi = day_deficit_window(load, goals, mode)
-        # base + spent = deficit + eaten; the budget is that minus the
-        # window floor — the pot the fat share is taken from (§7).
-        budget = max(0.0, deficit + data['съедено'] - lo)
-        ffloor, fcap = fat_range(load, goals, budget)
-        if fcap and data['ж'] > fcap * 1.2:
-            fat_sym, fat_note = '⚠', f' (перебор {data["ж"] - fcap:.0f}г)'
-        elif ffloor and data['ж'] < ffloor:
-            fat_sym, fat_note = '⚠', f' (ниже минимума на {ffloor - data["ж"]:.0f}г)'
-        else:
-            fat_sym, fat_note = '✓', ''
-        lines.append(f'- Жиры:      {fat_sym} {data["ж"]:.0f}г (день: {DAY_LOAD_LABEL[load]}, '
-                     f'диапазон {ffloor:.0f}–{fcap:.0f}){fat_note}')
-        if mode == 'поддержание':
-            bal_sym = '✓' if lo <= deficit <= hi else '⚠'
-            lines.append(f'- Баланс:    {bal_sym} {deficit:.0f} ккал (поддержание, цель ~0)')
-        else:
-            if deficit < lo:
-                d_sym = '✗' if deficit < 0 else '⚠'
-                d_note = f' (переедание: ниже окна на {lo - deficit:.0f})'
-            elif deficit <= hi:
-                d_sym, d_note = '✓', ''
-            elif load == 'low':
-                d_sym, d_note = '✓', f' (жёстче цели на {deficit - hi:.0f})'
-            else:
-                d_sym, d_note = '⚠', f' (недоедание: выше окна на {deficit - hi:.0f} — добрать углей)'
-            lines.append(f'- Дефицит:   {d_sym} {deficit:.0f} ккал (день: {DAY_LOAD_LABEL[load]}, окно {lo}–{hi}){d_note}')
+        st = day_status_lines(ref, data['съедено'], data['потрачено'], deficit,
+                              data['б'], data['ж'], data['у'], data.get('у_цель', 0),
+                              goals=goals, mode=mode)
+        lines += [f'- {st[key]}' for key in ('белок', 'углеводы', 'жиры', 'дефицит') if key in st]
         lines += day_med_verdict(ref)
         lines += rolling7_med_verdict(ref)
         print('\n'.join(lines))
