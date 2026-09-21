@@ -8,7 +8,7 @@ how much you have left to eat.
 
 The full agent behavior — parsing rules, macro math, training compensation, weekly
 deficit cycling, the Mediterranean-leaning ration planner — lives in
-[`AGENTS.md`](AGENTS.md) (`CLAUDE.md` is a symlink to it). That file *is* the program.
+[`AGENTS.md`](AGENTS.md). That file *is* the program.
 
 ## What it does
 
@@ -26,7 +26,7 @@ deficit cycling, the Mediterranean-leaning ration planner — lives in
 ## Layout
 
 ```
-AGENTS.md            the agent's instructions (CLAUDE.md → symlink)
+AGENTS.md            the agent's instructions — that file *is* the program
 today.md             symlink → diaries/YYYY/MM/DD.md (current day)
 config/              your inputs (goals, cycle, training types, weight history)
 data/diet.db         product catalog (SQLite) — the single source of truth
@@ -65,7 +65,7 @@ If you fork this and want a different split, edit `.gitignore` before your first
 ## Requirements
 
 - Python 3 (standard library only — no third-party packages)
-- An LLM coding agent that reads `AGENTS.md`
+- An LLM coding agent that reads `AGENTS.md` natively: Claude Code ≥ 2.1.277, opencode, or any other
 
 ## License
 
