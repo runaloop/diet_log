@@ -13,6 +13,8 @@
   --no-ration                     skip the plan_ration top-up at the end
 
 Diary defaults to today.md (the symlink is resolved; the real file is written).
+When it points at a past date nothing is written: run new_day.py first, or pass
+the diary path explicitly to log into that day on purpose.
 A product is resolved in the catalog (data/diet.db): exact name/alias first, then
 a unique substring. No match or several candidates → nothing is written, the
 candidates are printed, exit code ≠ 0. "Name 250г" / "Name 250" work like
@@ -205,8 +207,11 @@ def main(argv):
         sys.exit(f'нет дневника: {path}')
     ref = diary_date(str(path))
     if o['diary'] is None and ref != date.today():
-        print(f'⚠ today.md указывает на {ref}, а сегодня {date.today()} — «новый день» не сделан?',
-              file=sys.stderr)
+        hint = ('сначала python3 scripts/new_day.py'
+                if ref < date.today() else 'симлинк смотрит вперёд — почини его')
+        sys.exit(f'today.md указывает на {ref}, а сегодня {date.today()} — {hint}.\n'
+                 f'Записать именно в {ref} — передай путь: '
+                 f'log.py {path.relative_to(ROOT)} …')
     t = o['time'] or datetime.now().strftime('%H:%M')
 
     rows = []
