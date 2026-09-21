@@ -43,7 +43,7 @@ SEED_GROUPS = [
     ('яйца', 'умеренно', '2–4'),
     ('оливковое', 'умеренно', 'дефолт-жир'),
     ('красное_мясо', 'потолок', '≤1'),
-    ('сладкое', 'потолок', '≤2'),
+    ('обработка', 'потолок', '≤2'),
     ('добавки', 'потолок', 'фон'),
 ]
 
@@ -167,22 +167,32 @@ def cmd_migrate(con, args):
 def cmd_add(con, args):
     portion_raw, portion_g = parse_portion(args.port)
     avail = parse_avail(args.avail) if args.avail else None
+    # An update keeps every field the caller did not pass: `add "<name>" --alias x`
+    # must not blank out the macros. None therefore means "leave alone", so a
+    # value can be corrected but never cleared through this command.
+    estimated = 1 if args.estimate else None
     cur = con.execute(
         """INSERT INTO product(name, portion_raw, portion_g, k, b, zh, u, fiber,
                                prep_effort, estimated, fat_quality, priority, avail)
-           VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?,'neutral'),COALESCE(?,0),?)
+           VALUES (?,?,?,?,?,?,?,?,?,COALESCE(?,0),COALESCE(?,'neutral'),
+                   COALESCE(?,0),?)
            ON CONFLICT(name) DO UPDATE SET
-             portion_raw=excluded.portion_raw, portion_g=excluded.portion_g,
-             k=excluded.k, b=excluded.b, zh=excluded.zh, u=excluded.u,
-             fiber=excluded.fiber, prep_effort=excluded.prep_effort,
-             estimated=excluded.estimated,
+             portion_raw=COALESCE(excluded.portion_raw, product.portion_raw),
+             portion_g=COALESCE(excluded.portion_g, product.portion_g),
+             k=COALESCE(excluded.k, product.k),
+             b=COALESCE(excluded.b, product.b),
+             zh=COALESCE(excluded.zh, product.zh),
+             u=COALESCE(excluded.u, product.u),
+             fiber=COALESCE(excluded.fiber, product.fiber),
+             prep_effort=COALESCE(excluded.prep_effort, product.prep_effort),
+             estimated=COALESCE(?, product.estimated),
              fat_quality=COALESCE(?, product.fat_quality),
              priority=COALESCE(?, product.priority),
              avail=COALESCE(?, product.avail)
            RETURNING id""",
         (args.name, portion_raw, portion_g, args.k, args.b, args.zh, args.u,
-         args.fiber, args.prep, int(args.estimate), args.fat_quality,
-         args.priority, avail, args.fat_quality, args.priority, avail))
+         args.fiber, args.prep, estimated, args.fat_quality,
+         args.priority, avail, estimated, args.fat_quality, args.priority, avail))
     pid = cur.fetchone()[0]
     if args.alias:
         for a in (x.strip() for x in args.alias.split(',')):

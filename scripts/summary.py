@@ -27,7 +27,7 @@ GROUP_QUOTA = {
     'бобовые': ('floor', 3), 'рыба': ('floor', 5), 'орехи': ('floor', 7),
     'молочка': ('floor', 7), 'яйца': ('floor', 2),
     'птица': ('limit', 4), 'красное_мясо': ('limit', 1),
-    'обработка': ('limit', 2), 'добавки': ('limit', 20),
+    'обработка': ('limit', 2), 'добавки': ('limit', 7),
 }
 
 # Gram-anchored groups (STRATEGY.md §6a): 1 serving = 100 g of meat/fish as
@@ -655,11 +655,39 @@ def weektrend(ref: date, with_groups: bool = True):
     return '\n'.join(lines)
 
 
+# Groups deliberately without a weekly quota (STRATEGY.md §6): olive oil is the
+# default fat and is judged by the fat-quality rubric (§7), not by servings.
+QUOTA_EXEMPT = {'оливковое'}
+_quota_drift_warned = False
+
+
+def warn_quota_drift(con):
+    """Shout when the catalog tags products into a group GROUP_QUOTA ignores.
+
+    Such a group is counted nowhere: its servings vanish from the weekly
+    remainder and from every cap. Silent by nature, so it is worth a warning.
+    """
+    global _quota_drift_warned
+    if _quota_drift_warned:
+        return
+    _quota_drift_warned = True
+    rows = con.execute(
+        """SELECT g.name, COUNT(pg.product_id) FROM food_group g
+           JOIN product_group pg ON pg.group_id = g.id
+           GROUP BY g.name HAVING COUNT(pg.product_id) > 0""").fetchall()
+    orphans = [(g, n) for g, n in rows
+               if g not in GROUP_QUOTA and g not in QUOTA_EXEMPT]
+    for g, n in orphans:
+        print(f'⚠ группа «{g}» ({n} продуктов) не имеет квоты в GROUP_QUOTA — '
+              f'её порции не попадают ни в один отчёт', file=sys.stderr)
+
+
 def load_catalog_groups():
     """Map name/alias (lowercased) -> [(group, weight), ...] from diet.db."""
     if not DB_PATH.exists():
         return None
     con = sqlite3.connect(DB_PATH)
+    warn_quota_drift(con)
     pid_groups = defaultdict(list)
     for pid, g, w in con.execute(
             """SELECT pg.product_id, mg.name, pg.weight FROM product_group pg
