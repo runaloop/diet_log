@@ -138,10 +138,10 @@ def load_macros():
     of eating history (needed to pin a dish that's never been a staple)."""
     con = sqlite3.connect(DB_PATH)
     out, by_id = {}, {}
-    for pid, name, portion_raw, portion_g, k, b, zh, u in con.execute(
-            'SELECT id, name, portion_raw, portion_g, k, b, zh, u FROM product'):
+    for pid, name, portion_raw, portion_g, k, b, zh, u, fiber in con.execute(
+            'SELECT id, name, portion_raw, portion_g, k, b, zh, u, fiber FROM product'):
         rec = {'name': name, 'portion_raw': portion_raw, 'portion_g': portion_g,
-               'k': k, 'b': b, 'zh': zh, 'u': u}
+               'k': k, 'b': b, 'zh': zh, 'u': u, 'fiber': fiber}
         out[name.lower()] = rec
         by_id[pid] = rec
     for pid, text in con.execute('SELECT product_id, text FROM alias'):
@@ -152,18 +152,19 @@ def load_macros():
     return out
 
 
-def find_canonical(name_q, macros):
-    """Resolve a --pin/--exclude name query to its catalog record — exact
-    name/alias match first, substring fallback; exits on miss/ambiguity."""
+def find_canonical(name_q, macros, what='--pin/--exclude'):
+    """Resolve a name query to its catalog record — exact name/alias match
+    first, substring fallback; exits on miss/ambiguity (`what` prefixes the
+    message: which caller asked)."""
     key = name_q.strip().lower()
     rec = macros.get(key)
     if rec is not None:
         return rec
     cands = {v['name'] for k, v in macros.items() if key in k}
     if not cands:
-        sys.exit(f'--pin/--exclude: продукт не найден в каталоге: {name_q}')
+        sys.exit(f'{what}: продукт не найден в каталоге: {name_q}')
     if len(cands) > 1:
-        sys.exit(f'--pin/--exclude: неоднозначно ({", ".join(sorted(cands))}): {name_q}')
+        sys.exit(f'{what}: неоднозначно ({", ".join(sorted(cands))}): {name_q}')
     only = next(iter(cands))
     return next(v for v in macros.values() if v['name'] == only)
 
