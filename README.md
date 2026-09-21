@@ -6,9 +6,9 @@ natural language; the agent looks up macros in a local product catalog (SQLite),
 appends a row to today's diary, recomputes your daily energy balance, and tells you
 how much you have left to eat.
 
-The full agent behavior — parsing rules, macro math, training compensation, weekly
-deficit cycling, the Mediterranean-leaning ration planner — lives in
-[`AGENTS.md`](AGENTS.md). That file *is* the program.
+The full agent behavior — parsing rules, per-day deficit periodization, the
+Mediterranean-leaning ration planner — lives in [`AGENTS.md`](AGENTS.md) (core rules)
+and `docs/agent/` (procedures read on demand); the arithmetic lives in `scripts/`.
 
 ## What it does
 
@@ -17,8 +17,10 @@ deficit cycling, the Mediterranean-leaning ration planner — lives in
 - **Energy balance.** Base expenditure (resting metabolic rate) + logged training −
   food eaten → daily deficit, with macro targets (protein floor by bodyweight, carbs
   as the remainder, fat band).
-- **Training compensation.** Logged workouts add back calories and post-workout carbs.
-- **Weekly cycling.** Configurable deficit / maintenance week phases (`config/cycle.md`).
+- **Training days.** Logged workouts add back calories; the day's deficit window and
+  macro targets follow its training load (rest / moderate / hard).
+- **Per-day periodization.** The deficit lives on rest days, training days are fueled;
+  `config/cycle.md` holds the global mode (cutting or maintenance).
 - **Ration planner.** Suggests what to eat from your frequent staples to hit the day's
   target instead of discovering an overshoot after the fact.
 - **Period summaries.** Day / week / month rollups via `scripts/summary.py`.
@@ -31,7 +33,7 @@ today.md             symlink → diaries/YYYY/MM/DD.md (current day)
 config/              your inputs (goals, cycle, training types, weight history)
 data/diet.db         product catalog (SQLite) — the single source of truth
 diaries/YYYY/MM/DD   one markdown file per day
-scripts/             python helpers (summary, ration planner, db wrapper, validators)
+scripts/             python helpers (log, recalc_plan, summary, ration planner, db wrapper, validators)
 ```
 
 ## Use it for yourself
