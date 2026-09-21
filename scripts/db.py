@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 from paths import ROOT, DB_PATH
+import catalog_match
 
 # Mediterranean group model — STRATEGY.md §6. kind: пол | умеренно | потолок.
 SEED_GROUPS = [
@@ -203,6 +204,18 @@ def cmd_add(con, args):
     print(f'ok #{pid} {args.name}')
 
 
+def searchable(con):
+    """[(name, [name and aliases])] for catalog_match, straight from SQL."""
+    strings = {}
+    for name, alias in con.execute(
+            """SELECT p.name, a.text FROM product p
+               LEFT JOIN alias a ON a.product_id = p.id"""):
+        bucket = strings.setdefault(name, [name])
+        if alias:
+            bucket.append(alias)
+    return list(strings.items())
+
+
 def cmd_find(con, args):
     like = f'%{args.substr.lower()}%'
     rows = con.execute(
@@ -211,6 +224,18 @@ def cmd_find(con, args):
            FROM product p LEFT JOIN alias a ON a.product_id = p.id
            WHERE ulower(p.name) LIKE ? OR ulower(a.text) LIKE ?
            ORDER BY p.name""", (like, like)).fetchall()
+    if not rows:
+        # Substring missed — retry through the token-fuzzy fallback, which
+        # survives typos and word order. Browsing lists every hit; picking
+        # one is resolve_product's job, not this one's.
+        names = [t[-1] for t in catalog_match.rank(args.substr, searchable(con))]
+        if names:
+            rows = con.execute(
+                """SELECT p.name, p.portion_raw, p.k, p.b, p.zh, p.u, p.fiber,
+                          p.fat_quality, p.avail FROM product p
+                   WHERE p.name IN (%s)""" % ','.join('?' * len(names)),
+                names).fetchall()
+            rows.sort(key=lambda r: names.index(r[0]))
     if not rows:
         print('— ничего —')
         return
@@ -283,10 +308,16 @@ def resolve_product(con, name_q):
            LEFT JOIN alias a ON a.product_id = p.id
            WHERE ulower(p.name) LIKE ? OR ulower(a.text) LIKE ?""",
         (like, like)).fetchall()
-    if not rows:
-        sys.exit(f'продукт не найден: {name_q}')
     if len(rows) > 1:
         sys.exit('неоднозначно: ' + ', '.join(sorted(n for _, n in rows)))
+    if not rows:
+        name, ties = catalog_match.best(name_q, searchable(con))
+        if ties:
+            sys.exit('неоднозначно: ' + ', '.join(ties))
+        if name is None:
+            sys.exit(f'продукт не найден: {name_q}')
+        return con.execute('SELECT id, name FROM product WHERE name = ?',
+                           (name,)).fetchone()
     return rows[0]
 
 

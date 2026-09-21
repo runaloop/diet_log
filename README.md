@@ -34,6 +34,7 @@ config/              your inputs (goals, cycle, training types, weight history)
 data/diet.db         product catalog (SQLite) — the single source of truth
 diaries/YYYY/MM/DD   one markdown file per day
 scripts/             python helpers (log, recalc_plan, summary, ration planner, db wrapper, validators)
+tests/               unittest suite — `python3 -m unittest discover -s tests`
 ```
 
 ## Use it for yourself

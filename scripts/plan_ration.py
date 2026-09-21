@@ -44,6 +44,7 @@ from summary import (GROUP_QUOTA, GROUP_ORDER, GRAM_GROUPS, DAY_FAT_SHARE,
                      DAY_LOAD_LABEL, global_mode, protein_floor,
                      fat_range, day_load, day_budget, group_servings)
 from profile import parse_food_rows, load_canon
+import catalog_match
 from paths import DB_PATH, PROFILE_PATH, RATION, diary_path
 
 # Per-group daily dish cap: one group must not monopolise the plate.
@@ -154,19 +155,33 @@ def load_macros():
 
 def find_canonical(name_q, macros, what='--pin/--exclude'):
     """Resolve a name query to its catalog record — exact name/alias match
-    first, substring fallback; exits on miss/ambiguity (`what` prefixes the
-    message: which caller asked)."""
+    first, then substring, then the token-fuzzy fallback in catalog_match;
+    exits on miss/ambiguity (`what` prefixes the message: which caller
+    asked)."""
     key = name_q.strip().lower()
     rec = macros.get(key)
     if rec is not None:
         return rec
     cands = {v['name'] for k, v in macros.items() if key in k}
-    if not cands:
-        sys.exit(f'{what}: продукт не найден в каталоге: {name_q}')
     if len(cands) > 1:
         sys.exit(f'{what}: неоднозначно ({", ".join(sorted(cands))}): {name_q}')
+    if not cands:
+        name, ties = catalog_match.best(name_q, searchable(macros))
+        if ties:
+            sys.exit(f'{what}: неоднозначно ({", ".join(ties)}): {name_q}')
+        if name is None:
+            sys.exit(f'{what}: продукт не найден в каталоге: {name_q}')
+        cands = {name}
     only = next(iter(cands))
     return next(v for v in macros.values() if v['name'] == only)
+
+
+def searchable(macros):
+    """[(canonical name, [its name and aliases])] for catalog_match."""
+    by_name = {}
+    for key, rec in macros.items():
+        by_name.setdefault(rec['name'], []).append(key)
+    return list(by_name.items())
 
 
 def resolve_pin(spec, catalog, macros):
