@@ -25,6 +25,7 @@
 - `plan_ration.py`, `ration_totals.py`, `sort_ration.py` — рацион дня
 - `profile.py` — пересборка `data/profile.json`; `caffeine.py` — кофеин за период
 - `format_tables.py`, `validate_diary.py` — выравнивание таблиц, проверка сумм
+- `git_sync.py` — git целиком: `add .` → коммит → push; `-m` задаёт сообщение, без него `day <дата>: update`
 - `db` — обёртка каталога: `find` / `add` / `q` / `tag` / `avail` / `priority` / `rename` / `review`
 
 > **КАТАЛОГ ПРОДУКТОВ = `data/diet.db`.** Все операции с каталогом — только через обёртку `scripts/db`: найти — `scripts/db find <подстрока>` (имя или алиас); добавить/обновить — `scripts/db add "<имя>" --port 100г --k .. --b .. --zh .. --u .. [--fiber ..] [--alias "a,b"] [--prep low|med|high] [--estimate] [--fat-quality good|bad]`; произвольный запрос — `scripts/db q "select ..."`.
@@ -151,17 +152,13 @@ python3 scripts/log.py diaries/YYYY/MM/DD.md "<продукт>" --time HH:MM    
 - Если продукт, порция, тип тренировки или найденные значения неоднозначны — задать уточняющий вопрос. Не гадать.
 - Если дедлайн в `config/goals.md` уже в прошлом — сообщить об этом пользователю, но продолжить расчёты по текущим числам.
 
-## Git
-
-При `итоги дня`: нет `.git` — `git init`; `git add .`; есть staged — `git commit -m "day YYYY-MM-DD: …"` (сообщение на английском); коммитить нечего — сообщить, это не ошибка; затем `git push` (и если коммитить было нечего, но есть незапушенные коммиты); нет remote или сети — сообщить, не ошибка. На «новом дне» всё это делает `new_day.py` сам.
-
 ## Специальные команды
 
 | Команда | Действие |  |
 |---|---|---|
 | экспонента / добавить экспоненту | `log.py "Экспонента"` — 250г из каталога, без уточнений |  |
 | новый день | `python3 scripts/new_day.py` — вывод verbatim; еда из той же реплики логируется после скрипта |  |
-| итоги дня | `python3 scripts/summary.py day YYYY-MM-DD` — вывод verbatim (не пересказывать, не резюмировать), git commit |  |
+| итоги дня | `python3 scripts/summary.py day YYYY-MM-DD` — вывод verbatim (не пересказывать, не резюмировать), затем `python3 scripts/git_sync.py` |  |
 | итоги недели / итоги месяца | `summary.py week | month [дата]` — ISO-неделя / календарный месяц, verbatim; правила — `docs/agent/periods.md` |
 | недельный прогресс / остаток недели | `summary.py weektrend [дата]` — тренд дефицита/белка + остаток групп за 7 дней |  |
 | рацион · «сегодня хочу X» · «съел блюдо из плана» | `docs/agent/ration.md` (`plan_ration.py … --write --force`, `--pin`/`--exclude`, чек = лог) |  |

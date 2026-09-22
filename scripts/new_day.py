@@ -17,8 +17,8 @@ across AGENTS.md:
      sync again. config/medications.md is only read, never written.
   4. Diary N: weektrend header (--no-groups) + the План block, then today.md is
      repointed at it. An existing file is left alone; ration.md is not touched.
-  5. Git: add, commit "day D: close, start N", push. Nothing to commit and no
-     remote are both fine. --no-commit skips the step.
+  5. Git: git_sync.py with the message "day D: close, start N". Nothing to
+     commit and no remote are both fine. --no-commit skips the step.
   6. A compact report, then the full weektrend N (with groups) for the chat.
 
 Exit code is non-zero only where a human has to step in: a broken symlink, an
@@ -26,7 +26,6 @@ expired Garmin token, a diary that fails validation.
 """
 import contextlib
 import io
-import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -35,6 +34,7 @@ from paths import ROOT, MEDICATIONS, diary_path
 from format_tables import format_file
 from validate_diary import validate
 import garmin_sync
+import git_sync
 import pills
 import recalc_plan
 import summary
@@ -138,35 +138,6 @@ def open_day(n, dry):
     return report
 
 
-def git(*args):
-    return subprocess.run(['git', *args], cwd=ROOT, capture_output=True, text=True)
-
-
-def commit(d, n, dry):
-    msg = f'day {d}: close, start {n}'
-    if not (ROOT / '.git').exists():
-        if dry:
-            return [f'Git: (dry-run) git init, затем коммит «{msg}»']
-        git('init')
-    if dry:
-        dirty = [l for l in git('status', '--porcelain').stdout.split('\n') if l.strip()]
-        return [f'Git: (dry-run) закоммитил бы {len(dirty)} файлов — «{msg}»']
-    git('add', '.')
-    if git('diff', '--cached', '--quiet').returncode == 0:
-        report = ['Git: коммитить нечего']
-    else:
-        r = git('commit', '-m', msg)
-        report = [f'Git: «{msg}»'] if r.returncode == 0 else \
-                 [f'Git: коммит не прошёл — {(r.stderr or r.stdout).strip()}']
-    if not git('remote').stdout.strip():
-        report.append('  remote нет — пушить некуда')
-        return report
-    r = git('push')
-    tail = (r.stderr or r.stdout).strip().split('\n')[-1] if (r.stderr or r.stdout).strip() else ''
-    report.append('  push ok' if r.returncode == 0 else f'  push не прошёл — {tail}')
-    return report
-
-
 def main(argv):
     opts, i = {'back': 2}, 0
     while i < len(argv):
@@ -205,7 +176,9 @@ def main(argv):
     if opts.get('no-commit'):
         report.append('Git: пропущен (--no-commit)')
     else:
-        report += commit(d, n, dry)
+        said, refused = git_sync.run(f'day {d}: close, start {n}', dry)
+        report += said
+        needs_human = needs_human or refused
 
     print('\n'.join(report))
     print()
