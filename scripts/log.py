@@ -10,7 +10,6 @@
                                   nothing added to the catalog («!»-dishes, user-given macros)
   --activity "Бег Z2 52 мин" --kcal 480
                                   training row (kcal stored negative); pairs may repeat
-  --no-ration                     skip the plan_ration top-up at the end
 
 Diary defaults to today.md (the symlink is resolved; the real file is written).
 When it points at a past date nothing is written: run new_day.py first, or pass
@@ -23,11 +22,10 @@ piece/ml portions the number is pieces/ml.
 
 After the rows are in: План block + Потреблено recomputed (recalc_plan),
 tables aligned (format_tables), diary validated (validate_diary), and the
-reply printed — the new rows, the status block, the plan_ration top-up.
+reply printed — the new rows and the status block.
 """
 import json
 import re
-import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -141,7 +139,7 @@ def insert_rows(lines, rows, t):
 
 def parse_args(argv):
     o = dict(diary=None, specs=[], time=None, portion='catalog', macros={},
-             activities=[], ration=True)
+             activities=[])
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -174,8 +172,6 @@ def parse_args(argv):
                 o['activities'][-1][1] = abs(num(argv[i]))
             except (IndexError, ValueError):
                 sys.exit('--kcal: требуется число')
-        elif a == '--no-ration':
-            o['ration'] = False
         elif a.startswith('--'):
             sys.exit(f'неизвестный флаг {a}')
         elif o['diary'] is None and not o['specs'] and a.endswith('.md'):
@@ -249,13 +245,6 @@ def main(argv):
     errs = validate(path)
     if errs:
         print('\n⚠ validate_diary:\n' + '\n'.join(f'   ✗ {e}' for e in errs))
-    if o['ration']:
-        r = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'plan_ration.py'), str(path)],
-                           capture_output=True, text=True)
-        out = (r.stdout or r.stderr).strip()
-        if out:
-            print()
-            print(out)
 
 
 if __name__ == '__main__':
