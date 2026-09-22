@@ -26,8 +26,9 @@ Usage:
   (fetch/activities/base/weight accept --json for the raw API response)
 
 `apply` is the whole «синк гармин» in one call: logs the day's workouts
-that are not in the diary yet (zone in the name, split rows when a Z1–2
-and a Z3+ part both carry ≥150 kcal, `other` skipped), writes or updates
+that are not in the diary yet (zone in the name — from power zones for
+cycling, from HR otherwise; split rows when a Z1–2 and a Z3+ part both
+carry ≥150 kcal, `other` skipped), writes or updates
 the NEAT top-up row «Прочая активность (Garmin)» (skipped when marked
 «ручной фикс» / «не синкать», updated only when off by >20 kcal),
 appends a new weigh-in with body composition to config/user.md, and with
@@ -313,17 +314,36 @@ def fetch(date, raw=False):
         print(f"steps:  {steps}")
 
 
-def _zone_kcal(a, active_kcal):
-    """Split a workout's active kcal across HR zones pro rata by time.
+def _power_times(a):
+    """Seconds per HR-scale zone from Garmin's 7 power zones, or {} if absent.
 
-    Garmin gives seconds per HR zone (hrTimeInZone_1..5); kcal are not
-    reported per zone, so time share is the estimate. Empty zones dropped.
+    Power zones 6–7 (anaerobic, neuromuscular) fold into Z5: the diary only
+    ever asks «low or high», and nothing above Z5 exists on the HR scale.
     """
-    times = [(z, a.get(f"hrTimeInZone_{z}") or 0.0) for z in range(1, 6)]
-    total = sum(t for _, t in times)
+    times = {}
+    for pz in range(1, 8):
+        t = a.get(f"powerTimeInZone_{pz}") or 0.0
+        if t:
+            times[min(pz, 5)] = times.get(min(pz, 5), 0.0) + t
+    return times
+
+
+def _zone_kcal(a, active_kcal, type_key=None):
+    """Split a workout's active kcal across zones pro rata by time.
+
+    Cycling with a power meter is read from powerTimeInZone_1..7: on a long
+    ride HR drifts upward at constant effort, so heart rate alone labels a
+    steady Z2 as intervals. Everything else — and cycling without power —
+    falls back to hrTimeInZone_1..5. Kcal are not reported per zone, so time
+    share is the estimate. Empty zones dropped.
+    """
+    times = _power_times(a) if type_key in POWER_ZONE_TYPES else {}
+    if not times:
+        times = {z: a.get(f"hrTimeInZone_{z}") or 0.0 for z in range(1, 6)}
+    total = sum(times.values())
     if not total or not active_kcal:
         return {}
-    return {z: active_kcal * t / total for z, t in times if t > 0}
+    return {z: active_kcal * t / total for z, t in times.items() if t > 0}
 
 
 def get_activities(opener, tokens, date):
@@ -374,7 +394,7 @@ def activities(date, raw=False):
         # BMR burned during the workout, which the diary's base expenditure
         # already covers — subtracting bmrCalories avoids double counting.
         kcal = round((a.get("calories") or 0) - (a.get("bmrCalories") or 0))
-        zones = _zone_kcal(a, kcal)
+        zones = _zone_kcal(a, kcal, type_key)
         zone_s = ""
         if zones:
             # A workout counts as steady (Z1/Z2) only if ≥90% of its kcal live
@@ -462,6 +482,8 @@ TYPE_RU = {
 }
 SKIP_TYPES = {"other"}                       # contrast shower & co: NEAT covers them
 NO_ZONE_TYPES = {"walking", "hiking", "strength_training", "yoga", "pilates"}
+POWER_ZONE_TYPES = {"cycling", "indoor_cycling", "virtual_ride", "road_biking",
+                    "mountain_biking", "gravel_cycling"}  # zones from power, HR is the fallback
 SPLIT_MIN_KCAL = 150                         # Z1–2 part and Z3+ part both ≥ this → two rows
 NEAT_NAME = "Прочая активность (Garmin)"
 NEAT_MATCH = "Прочая активность"           # the row may carry a suffix («…, ручной фикс»)
@@ -535,7 +557,7 @@ def workout_rows(a):
     ru = TYPE_RU.get(type_key) or (a.get("activityName") or type_key)
     if type_key in NO_ZONE_TYPES:
         return [(f"{ru} {mins} мин", kcal)]
-    zones = _zone_kcal(a, kcal)
+    zones = _zone_kcal(a, kcal, type_key)
     if not zones:
         return [(f"{ru} Z2 {mins} мин", kcal)]   # no HR data: unknown zone counts as Z2
     low = zones.get(1, 0.0) + zones.get(2, 0.0)
