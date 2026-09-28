@@ -19,6 +19,8 @@ test("request to bonsai gets temperature 0 and template kwargs, others are untou
 	const out = fire("before_provider_request",
 		{ payload: { model: "ternary-bonsai-2-27b", messages: [], chat_template_kwargs: { enable_thinking: true } } }, makeCtx());
 	assert.equal(out.temperature, 0);
+	assert.equal(out.thinking_budget_tokens, 4096);
+	assert.match(out.reasoning_budget_message, /answer or make the next tool call/);
 	assert.deepEqual(out.chat_template_kwargs, { enable_thinking: true, reasoning_effort: "xhigh", preserve_thinking: false });
 	assert.equal(fire("before_provider_request", { payload: { model: "x" } }, makeCtx("qwen3.5-0.8b")), undefined);
 });

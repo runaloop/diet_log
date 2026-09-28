@@ -10,6 +10,10 @@ const MODEL_ID = "ternary-bonsai-2-27b";
 const TAG = "</think>";
 // The chat template accepts only low, medium and xhigh.
 const REASONING_EFFORT = "xhigh";
+// Reasoning and the answer share max_tokens; without a cap the model can spend all of it
+// re-verifying (a 300-word task failed 3/3 uncapped and passed 3/3 at 4096).
+const REASONING_BUDGET = 4096;
+const BUDGET_MESSAGE = " Budget reached - stop checking and act now: answer or make the next tool call.";
 
 type Part = { type: string; text?: string };
 type Msg = { role: string; content?: unknown; stopReason?: string; errorMessage?: string };
@@ -55,6 +59,8 @@ export default function (pi: ExtensionAPI) {
 		return {
 			...payload,
 			temperature: 0,
+			thinking_budget_tokens: REASONING_BUDGET,
+			reasoning_budget_message: BUDGET_MESSAGE,
 			chat_template_kwargs: {
 				...payload.chat_template_kwargs,
 				reasoning_effort: REASONING_EFFORT,
