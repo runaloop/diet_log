@@ -16,8 +16,8 @@ When it points at a past date nothing is written: run new_day.py first, or pass
 the diary path explicitly to log into that day on purpose.
 A product is resolved in the catalog (data/diet.db): exact name/alias first, then
 a unique substring. No match or several candidates → nothing is written, the
-candidates are printed, exit code ≠ 0. "Name 250г" / "Name 250" work like
-"Name:250". Grams scale the catalog macros from its default portion; for
+candidates are printed, exit code ≠ 0. "Name 250г" / "Name 250" / "Name:250г" work
+like "Name:250". Grams scale the catalog macros from its default portion; for
 piece/ml portions the number is pieces/ml.
 
 After the rows are in: План block + Потреблено recomputed (recalc_plan),
@@ -38,7 +38,7 @@ from validate_diary import validate
 import recalc_plan
 
 TIME_RE = re.compile(r'^\d{2}:\d{2}$')
-COLON_RE = re.compile(r'^(.*?):\s*(\d+(?:[.,]\d+)?)\s*$')
+COLON_RE = re.compile(r'^(.*?):\s*(\d+(?:[.,]\d+)?)\s*(?:г|гр|g)?\s*$', re.IGNORECASE)
 TRAIL_RE = re.compile(r'^(.*\S)\s+(\d+(?:[.,]\d+)?)\s*(?:г|гр|g)?\s*$', re.IGNORECASE)
 LEAD_RE = re.compile(r'^(\d+(?:[.,]\d+)?)\s*(?:г|гр|g)?\s+(.+)$', re.IGNORECASE)
 RAW_UNIT_RE = re.compile(r'(\d+(?:[.,]\d+)?)\s*(мл|шт)', re.IGNORECASE)

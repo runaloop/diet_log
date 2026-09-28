@@ -157,7 +157,7 @@ def main(argv):
     d, path = link_date()
     n = date.fromisoformat(opts['date']) if 'date' in opts else date.today()
     if n == d:
-        print(f'today.md уже указывает на {n} — закрывать нечего')
+        print(f'today.md уже указывает на {n} — закрывать нечего, день ещё идёт; подвести его — «итоги дня»')
         return 0
     if n < d:
         sys.exit(f'today.md указывает на {d}, а запрошен {n} — назад не закрываю')

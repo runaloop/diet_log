@@ -1,2 +1,11 @@
-#!/bin/sh
-exec python3 "$(dirname "$0")/db.py" "$@"
+#!/usr/bin/env python3
+# Valid as sh and as Python: `scripts/db`, `sh scripts/db` and `python3 scripts/db` all reach db.py.
+"exec" "python3" "$0" "$@"
+import runpy
+import sys
+from pathlib import Path
+
+target = Path(__file__).resolve().with_name('db.py')
+sys.argv[0] = str(target)
+sys.path.insert(0, str(target.parent))
+runpy.run_path(str(target), run_name='__main__')
