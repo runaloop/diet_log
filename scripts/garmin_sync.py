@@ -490,6 +490,7 @@ NEAT_MATCH = "Прочая активность"           # the row may carry a
 NEAT_TIME = "23:59"
 NEAT_TOLERANCE = 20                          # kcal; smaller drift leaves the row alone
 MANUAL_RE = re.compile(r"ручной фикс|не синкать", re.IGNORECASE)
+EXTRA_RE = re.compile(r"компенсаци", re.IGNORECASE)    # manual top-up beyond the watch, kept out of the Garmin total
 BASE_DRIFT = 0.02
 ROW_RE = re.compile(r"^\|\s*(\d{2}:\d{2})\s*\|\s*([^|]*?)\s*\|\s*(-?[\d.]+)\s*\|")
 WEIGHT_ROW_RE = re.compile(
@@ -621,7 +622,7 @@ def sync_diary(d, src, path, dry_run):
     if active is not None:
         rows = training_rows(lines)
         neat = [(i, n, k) for i, _, n, k in rows if NEAT_MATCH in n]
-        spent = sum(k for _, _, n, k in rows if NEAT_MATCH not in n)
+        spent = sum(k for _, _, n, k in rows if NEAT_MATCH not in n and not EXTRA_RE.search(n))
         diff = round(active - spent)
         if neat:
             i, name, current = neat[0]
