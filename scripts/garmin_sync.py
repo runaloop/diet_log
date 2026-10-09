@@ -488,6 +488,7 @@ SPLIT_MIN_KCAL = 150                         # Z1–2 part and Z3+ part both ≥
 NEAT_NAME = "Прочая активность (Garmin)"
 NEAT_MATCH = "Прочая активность"           # the row may carry a suffix («…, ручной фикс»)
 NEAT_TIME = "23:59"
+WORKOUT_ROW_TIME = "sync"                    # "sync": row time = sync time (today only); "start": workout start time
 NEAT_TOLERANCE = 20                          # kcal; smaller drift leaves the row alone
 MANUAL_RE = re.compile(r"ручной фикс|не синкать", re.IGNORECASE)
 EXTRA_RE = re.compile(r"компенсаци", re.IGNORECASE)    # manual top-up beyond the watch, kept out of the Garmin total
@@ -602,18 +603,23 @@ def sync_diary(d, src, path, dry_run):
         lines = recalc_plan.apply(lines, recalc_plan.compute(lines, d))
     report, changed = [], False
 
-    logged_times = {t for _, t, n, _ in training_rows(lines) if NEAT_MATCH not in n}
+    logged = [(t, n, k) for _, t, n, k in training_rows(lines) if NEAT_MATCH not in n]
+    logged_times = {t for t, _, _ in logged}
+    logged_rows = {(n, round(k)) for _, n, k in logged}
+    use_now = WORKOUT_ROW_TIME == "sync" and day == time.strftime("%Y-%m-%d")
+    row_time = time.strftime("%H:%M") if use_now else None
     new_rows = []
     for a in sorted(src.activities(day), key=lambda a: a.get("startTimeLocal", "")):
         start = (a.get("startTimeLocal") or "")[11:16]
         if start in logged_times:
             continue
         rows = workout_rows(a)
-        if not rows:
+        if not rows or all((n, round(k)) in logged_rows for n, k in rows):
             continue
+        at = row_time or start
         for name, kcal in rows:
             report.append(f"{day}: + {name} −{kcal} ({start})")
-        new_rows.append((start, [activity_row(start, n, k) for n, k in rows]))
+        new_rows.append((at, [activity_row(at, n, k) for n, k in rows]))
     for start, rows in new_rows:
         lines = insert_rows(lines, rows, start)
         changed = True
@@ -663,11 +669,14 @@ def sync_weight(d, src, user_path, dry_run):
     text = user_path.read_text(encoding="utf-8")
     lines = text.split("\n")
     rows = [(i, m) for i, l in enumerate(lines) if (m := WEIGHT_ROW_RE.match(l))]
+    prev = {}
     if rows:
         last_i, last = max(rows, key=lambda r: r[1].group(1))
         last_date, last_kg = last.group(1), float(last.group(2))
         last_fat = float(last.group(3)) if last.group(3) else None
         last_muscle = float(last.group(4)) if last.group(4) else None
+        last_bone = float(last.group(5)) if last.group(5) else None
+        prev = {"kg": last_kg, "fat": last_fat, "muscle": last_muscle, "bone": last_bone}
         if when <= last_date:
             return []
         same = kg == last_kg
@@ -680,15 +689,20 @@ def sync_weight(d, src, user_path, dry_run):
         insert_at = len(lines)
     fmt = lambda v, nd: ("" if v is None else f"{v:.{nd}f}")
     row = f"| {when} | {kg} | {fmt(fat, 1)} | {fmt(muscle, 1)} | {fmt(bone, 2)} | Garmin |"
-    body = " · ".join(s for s in (f"жир {fat:.1f}%" if fat is not None else "",
-                                   f"мышцы {muscle}" if muscle else "",
-                                   f"кость {bone}" if bone else "") if s)
+    def delta(key, v, nd):
+        p = prev.get(key)
+        if p is None or v is None or round(v - p, nd) == 0:
+            return ""
+        return f" {'↑' if v > p else '↓'}{abs(v - p):.{nd}f}"
+    body = " · ".join(s for s in (f"жир {fat:.1f}%{delta('fat', fat, 1)}" if fat is not None else "",
+                                   f"мышцы {muscle}{delta('muscle', muscle, 1)}" if muscle else "",
+                                   f"кость {bone}{delta('bone', bone, 2)}" if bone else "") if s)
     if not dry_run:
         lines.insert(insert_at, row)
         user_path.write_text("\n".join(lines), encoding="utf-8")
         from format_tables import format_file
         format_file(user_path)
-    return [f"вес: {kg} кг ({when}) → {user_path.name}" + (f"; {body}" if body else "")]
+    return [f"вес: {kg} кг{delta('kg', kg, 1)} ({when}) → {user_path.name}" + (f"; {body}" if body else "")]
 
 
 def sync_base(d, src, user_path, dry_run):
