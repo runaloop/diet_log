@@ -2,7 +2,8 @@
 name: product-lookup
 description: Находит КБЖУ продукта, которого нет в каталоге data/diet.db, и добавляет его через scripts/db add. Использовать всегда, когда scripts/log.py ответил «продукт не найден в каталоге» или пользователь назвал новый продукт. На вход — название как написал пользователь и, если есть, граммовка; на выход — одна строка с каноническим именем и КБЖУ.
 tools: Bash, Read, WebFetch, WebSearch
-model: sonnet
+model: haiku
+effort: high
 omitClaudeMd: true
 ---
 
