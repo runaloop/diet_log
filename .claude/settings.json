@@ -1,5 +1,5 @@
 {
-  "effortLevel": "low",
+  "effortLevel": "high",
   "permissions": {
     "allow": [
       "Edit",
@@ -7,5 +7,6 @@
       "Bash",
       "WebFetch"
     ]
-  }
+  },
+  "model": "haiku"
 }
