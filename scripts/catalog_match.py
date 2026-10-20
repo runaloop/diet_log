@@ -28,7 +28,9 @@ TOKEN_THRESHOLD = 0.75
 MARGIN = 0.05
 # Similarity alone cannot separate «Экспонента» from «Экспонента Био Скир»:
 # the matched word is identical. Coverage — how much of the candidate the
-# query actually accounts for — breaks that tie, and only that tie.
+# query actually accounts for — breaks that tie, and only when the leader is
+# named in full: «чипсы» is half of «Кокосовые чипсы» and a third of «Чипсы
+# из курятины», which says nothing about which one was meant.
 COVERAGE_MARGIN = 0.05
 # Below this length a typo is indistinguishable from a different word, so
 # short tokens must match exactly ('смит', 'чиа', '2%').
@@ -115,6 +117,8 @@ def best(query, entries):
     if len(near) == 1:
         return near[0][2], []
     top_cov = near[0][1]
+    if top_cov < 1.0:
+        return None, sorted(n for _, _, n in near)
     ties = [n for _, cov, n in near if top_cov - cov < COVERAGE_MARGIN]
     if len(ties) > 1:
         return None, sorted(ties)

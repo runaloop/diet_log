@@ -117,6 +117,14 @@ class CoverageBreaksIdenticalWordTies(unittest.TestCase):
         self.assertIsNone(name)
         self.assertEqual(ties, ['Стейк тунца', 'Стейк форели'])
 
+    def test_shorter_partial_name_does_not_win(self):
+        """«чипы» is half of one name and a third of another: still a guess."""
+        entries = [('Кокосовые чипсы', ['кокосовые чипсы']),
+                   ('Чипсы из курятины', ['чипсы из курятины'])]
+        name, ties = catalog_match.best('чипы', entries)
+        self.assertIsNone(name)
+        self.assertEqual(ties, ['Кокосовые чипсы', 'Чипсы из курятины'])
+
 
 class RefusesToGuess(unittest.TestCase):
     """A wrong pick is silent; a refusal is not. Keep it that way."""

@@ -10,6 +10,9 @@
                                   nothing added to the catalog («!»-dishes, user-given macros)
   --activity "Бег Z2 52 мин" --kcal 480
                                   training row (kcal stored negative); pairs may repeat
+  --fix "[HH:MM] <подстрока>"     replace ONE existing row with the given products /
+                                  activities; they take its place and time unless --time
+  --delete "[HH:MM] <подстрока>"  remove ONE existing row
 
 Diary defaults to today.md (the symlink is resolved; the real file is written).
 When it points at a past date nothing is written: run new_day.py first, or pass
@@ -19,6 +22,9 @@ a unique substring. No match or several candidates → nothing is written, the
 candidates are printed, exit code ≠ 0. "Name 250г" / "Name 250" / "Name:250г" work
 like "Name:250". Grams scale the catalog macros from its default portion; for
 piece/ml portions the number is pieces/ml.
+--fix/--delete match a row by case-insensitive substring of its label, optionally
+narrowed by a leading time; no match or several matches → nothing is written,
+the candidates are printed, exit code ≠ 0.
 
 After the rows are in: План block + Потреблено recomputed (recalc_plan),
 tables aligned (format_tables), diary validated (validate_diary), and the
@@ -137,9 +143,37 @@ def insert_rows(lines, rows, t):
     return lines[:pos] + rows + lines[pos:]
 
 
+def table_rows(lines):
+    """[(line index, time, label)] of the diary's food/training table."""
+    header = next((i for i, l in enumerate(lines)
+                   if l.strip().startswith('|') and 'Продукт/Активность' in l), None)
+    if header is None:
+        return []
+    out = []
+    i = header + 2
+    while i < len(lines) and lines[i].strip().startswith('|'):
+        cells = [c.strip() for c in lines[i].strip().strip('|').split('|')]
+        if len(cells) >= 2 and TIME_RE.match(cells[0]):
+            out.append((i, cells[0], cells[1]))
+        i += 1
+    return out
+
+
+def match_rows(rows, query):
+    """Rows whose label contains `query`; a leading HH:MM pins the time."""
+    q = query.strip()
+    t = None
+    head, _, rest = q.partition(' ')
+    if TIME_RE.match(head):
+        t, q = head, rest.strip()
+    q = q.lower().replace('ё', 'е')
+    return [r for r in rows
+            if (t is None or r[1] == t) and q in r[2].lower().replace('ё', 'е')]
+
+
 def parse_args(argv):
     o = dict(diary=None, specs=[], time=None, portion='catalog', macros={},
-             activities=[])
+             activities=[], fix=None, delete=None)
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -172,6 +206,11 @@ def parse_args(argv):
                 o['activities'][-1][1] = abs(num(argv[i]))
             except (IndexError, ValueError):
                 sys.exit('--kcal: требуется число')
+        elif a in ('--fix', '--delete'):
+            i += 1
+            if i >= len(argv) or not argv[i].strip():
+                sys.exit(f'{a}: требуется строка для поиска («Банан» или «09:33 Банан»)')
+            o[a[2:]] = argv[i]
         elif a.startswith('--'):
             sys.exit(f'неизвестный флаг {a}')
         elif o['diary'] is None and not o['specs'] and a.endswith('.md'):
@@ -187,7 +226,13 @@ def parse_args(argv):
         missing = [k for k in ('k', 'b', 'zh', 'u') if k not in o['macros']]
         if missing:
             sys.exit(f'явные КБЖУ: не хватает --{" --".join(missing)}')
-    if not o['specs'] and not o['activities']:
+    if o['fix'] is not None and o['delete'] is not None:
+        sys.exit('--fix и --delete вместе не работают')
+    if o['delete'] is not None and (o['specs'] or o['activities']):
+        sys.exit('--delete только удаляет; замена — --fix')
+    if o['fix'] is not None and not o['specs'] and not o['activities']:
+        sys.exit('--fix: чем заменить? Продукт или --activity; просто удалить — --delete')
+    if not o['specs'] and not o['activities'] and o['delete'] is None:
         print(__doc__)
         sys.exit(1)
     return o
@@ -208,7 +253,19 @@ def main(argv):
         sys.exit(f'today.md указывает на {ref}, а сегодня {date.today()} — {hint}.\n'
                  f'Записать именно в {ref} — передай путь: '
                  f'log.py {path.relative_to(ROOT)} …')
-    t = o['time'] or datetime.now().strftime('%H:%M')
+    lines = path.read_text(encoding='utf-8').rstrip('\n').split('\n')
+    target = None
+    query = o['fix'] if o['fix'] is not None else o['delete']
+    if query is not None:
+        found = match_rows(table_rows(lines), query)
+        if len(found) != 1:
+            print(f'«{query}»: ' + ('строка не найдена' if not found else
+                                    f'подходящих строк: {len(found)} — уточни (время, полнее название)'))
+            for _, rt, label in (found or table_rows(lines)):
+                print(f'   {rt} {label}')
+            sys.exit(2)
+        target = found[0]
+    t = o['time'] or (target[1] if target else datetime.now().strftime('%H:%M'))
 
     rows = []
     if o['macros']:
@@ -230,17 +287,31 @@ def main(argv):
         rows += [food_row(t, label, m) for label, m in resolved]
     rows += [activity_row(t, name, kcal) for name, kcal in o['activities']]
 
-    lines = path.read_text(encoding='utf-8').rstrip('\n').split('\n')
-    if not any('Продукт/Активность' in l for l in lines):
-        lines = recalc_plan.apply(lines, recalc_plan.compute(lines, ref))
-    lines = insert_rows(lines, rows, t)
+    removed = None
+    if target and o['time'] is None:
+        removed = lines[target[0]]
+        lines = lines[:target[0]] + rows + lines[target[0] + 1:]
+    else:
+        if target:
+            removed = lines.pop(target[0])
+        if not any('Продукт/Активность' in l for l in lines):
+            lines = recalc_plan.apply(lines, recalc_plan.compute(lines, ref))
+        if rows:
+            lines = insert_rows(lines, rows, t)
     c = recalc_plan.compute(lines, ref)
     lines = recalc_plan.apply(lines, c)
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     format_file(path)
 
-    print(format_text('\n'.join(recalc_plan.TABLE_HEADER + rows)))
-    print()
+    if removed:
+        print('Убрано:')
+        print(format_text('\n'.join(recalc_plan.TABLE_HEADER + [removed])))
+        print()
+    if rows:
+        if removed:
+            print('Вместо неё:')
+        print(format_text('\n'.join(recalc_plan.TABLE_HEADER + rows)))
+        print()
     print('\n'.join(recalc_plan.status_block(c, ref, lines)))
     errs = validate(path)
     if errs:
