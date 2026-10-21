@@ -16,8 +16,10 @@ Subcommands:
   review               list products still needing group tagging
 
 Schema:
-  product(id, name UNIQUE, portion_raw, portion_g, k, b, zh, u, fiber,
-          prep_effort, estimated, review)
+  product(id, name UNIQUE, portion_raw, portion_g, serving_g, k, b, zh, u,
+          fiber, prep_effort, estimated, review)
+    portion_raw/portion_g — the portion the macros are given for (usually 100г);
+    serving_g — optional grams of one real serving, logged when no weight is named
   alias(product_id, text)
   food_group(id, name UNIQUE, kind, quota_week)
   product_group(product_id, group_id, weight)         -- m2m, composites
@@ -56,6 +58,7 @@ CREATE TABLE IF NOT EXISTS product (
   name        TEXT UNIQUE NOT NULL,
   portion_raw TEXT,
   portion_g   REAL,
+  serving_g   REAL,
   k           REAL, b REAL, zh REAL, u REAL, fiber REAL,
   prep_effort TEXT,
   estimated   INTEGER NOT NULL DEFAULT 0,
@@ -109,6 +112,7 @@ def connect():
     for ddl in (
         "ALTER TABLE product ADD COLUMN fat_quality TEXT NOT NULL DEFAULT 'neutral'",
         "ALTER TABLE product ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE product ADD COLUMN serving_g REAL",
     ):
         try:
             con.execute(ddl)
@@ -167,19 +171,25 @@ def cmd_migrate(con, args):
 
 def cmd_add(con, args):
     portion_raw, portion_g = parse_portion(args.port)
+    serving_g = parse_float(re.sub(r'\s*(г|гр|g)\s*$', '', args.serving, flags=re.I)) \
+        if args.serving else None
+    if args.serving and not serving_g:
+        sys.exit(f'--serving: нужны граммы, получено «{args.serving}»')
     avail = parse_avail(args.avail) if args.avail else None
     # An update keeps every field the caller did not pass: `add "<name>" --alias x`
     # must not blank out the macros. None therefore means "leave alone", so a
     # value can be corrected but never cleared through this command.
     estimated = 1 if args.estimate else None
     cur = con.execute(
-        """INSERT INTO product(name, portion_raw, portion_g, k, b, zh, u, fiber,
-                               prep_effort, estimated, fat_quality, priority, avail)
-           VALUES (?,?,?,?,?,?,?,?,?,COALESCE(?,0),COALESCE(?,'neutral'),
+        """INSERT INTO product(name, portion_raw, portion_g, serving_g, k, b, zh, u,
+                               fiber, prep_effort, estimated, fat_quality, priority,
+                               avail)
+           VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?,0),COALESCE(?,'neutral'),
                    COALESCE(?,0),?)
            ON CONFLICT(name) DO UPDATE SET
              portion_raw=COALESCE(excluded.portion_raw, product.portion_raw),
              portion_g=COALESCE(excluded.portion_g, product.portion_g),
+             serving_g=COALESCE(excluded.serving_g, product.serving_g),
              k=COALESCE(excluded.k, product.k),
              b=COALESCE(excluded.b, product.b),
              zh=COALESCE(excluded.zh, product.zh),
@@ -191,7 +201,7 @@ def cmd_add(con, args):
              priority=COALESCE(?, product.priority),
              avail=COALESCE(?, product.avail)
            RETURNING id""",
-        (args.name, portion_raw, portion_g, args.k, args.b, args.zh, args.u,
+        (args.name, portion_raw, portion_g, serving_g, args.k, args.b, args.zh, args.u,
          args.fiber, args.prep, estimated, args.fat_quality,
          args.priority, avail, estimated, args.fat_quality, args.priority, avail))
     pid = cur.fetchone()[0]
@@ -219,7 +229,7 @@ def searchable(con):
 def cmd_find(con, args):
     like = f'%{args.substr.lower()}%'
     rows = con.execute(
-        """SELECT DISTINCT p.name, p.portion_raw, p.k, p.b, p.zh, p.u, p.fiber,
+        """SELECT DISTINCT p.name, p.portion_raw, p.serving_g, p.k, p.b, p.zh, p.u, p.fiber,
                   p.fat_quality, p.avail
            FROM product p LEFT JOIN alias a ON a.product_id = p.id
            WHERE ulower(p.name) LIKE ? OR ulower(a.text) LIKE ?
@@ -231,7 +241,7 @@ def cmd_find(con, args):
         names = [t[-1] for t in catalog_match.rank(args.substr, searchable(con))]
         if names:
             rows = con.execute(
-                """SELECT p.name, p.portion_raw, p.k, p.b, p.zh, p.u, p.fiber,
+                """SELECT p.name, p.portion_raw, p.serving_g, p.k, p.b, p.zh, p.u, p.fiber,
                           p.fat_quality, p.avail FROM product p
                    WHERE p.name IN (%s)""" % ','.join('?' * len(names)),
                 names).fetchall()
@@ -239,7 +249,9 @@ def cmd_find(con, args):
     if not rows:
         print('— ничего —')
         return
-    for name, port, k, b, zh, u, fib, fq, av in rows:
+    for name, port, serving, k, b, zh, u, fib, fq, av in rows:
+        if serving:
+            port = f'{port} · порция {serving:g}г'
         tag = '' if fq == 'neutral' else f' жир:{fq}'
         tag += f' · {av}' if av else ''
         print(f'{name} [{port}] К{k} Б{b} Ж{zh} У{u} Клет{fib}{tag}')
@@ -368,6 +380,7 @@ def main():
     a = sub.add_parser('add')
     a.add_argument('name')
     a.add_argument('--port', default='')
+    a.add_argument('--serving', help='grams of one serving, logged when no weight is named')
     a.add_argument('--k', type=float)
     a.add_argument('--b', type=float)
     a.add_argument('--zh', type=float)

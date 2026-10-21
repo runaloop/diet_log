@@ -134,15 +134,16 @@ def load_catalog():
 
 
 def load_macros():
-    """name/alias(lower) -> {'name', 'portion_g', 'k', 'b', 'zh', 'u'} straight
+    """name/alias(lower) -> {'name', 'portion_g', 'serving_g', 'k', …} straight
     from the catalog — unlike load_dishes(), covers every product regardless
     of eating history (needed to pin a dish that's never been a staple)."""
     con = sqlite3.connect(DB_PATH)
     out, by_id = {}, {}
-    for pid, name, portion_raw, portion_g, k, b, zh, u, fiber in con.execute(
-            'SELECT id, name, portion_raw, portion_g, k, b, zh, u, fiber FROM product'):
+    for pid, name, portion_raw, portion_g, serving_g, k, b, zh, u, fiber in con.execute(
+            'SELECT id, name, portion_raw, portion_g, serving_g, k, b, zh, u, fiber '
+            'FROM product'):
         rec = {'name': name, 'portion_raw': portion_raw, 'portion_g': portion_g,
-               'k': k, 'b': b, 'zh': zh, 'u': u, 'fiber': fiber}
+               'serving_g': serving_g, 'k': k, 'b': b, 'zh': zh, 'u': u, 'fiber': fiber}
         out[name.lower()] = rec
         by_id[pid] = rec
     for pid, text in con.execute('SELECT product_id, text FROM alias'):
@@ -186,7 +187,7 @@ def searchable(macros):
 
 def resolve_pin(spec, catalog, macros):
     """spec = 'Name' or 'Name:grams'. Scale the catalog product to `grams`
-    (or its default portion if omitted) and shape it like a planner dish."""
+    (or its serving / default portion if omitted) and shape it like a planner dish."""
     if ':' in spec:
         name_q, grams_s = spec.rsplit(':', 1)
         grams = float(grams_s)
@@ -194,6 +195,8 @@ def resolve_pin(spec, catalog, macros):
         name_q, grams = spec, None
     rec = find_canonical(name_q, macros)
     portion_g = rec['portion_g']
+    if grams is None and portion_g and rec.get('serving_g'):
+        grams = rec['serving_g']
     if grams is None:
         grams = portion_g or 0.0
         k, b, zh, u = rec['k'], rec['b'], rec['zh'], rec['u']

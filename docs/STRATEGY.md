@@ -301,6 +301,9 @@ carryover ×1): целевой дефицит ~1230 ккал/нед ≈ 0.16 к�
 ```sql
 product(id, name, portion_g, k, b, zh, u, fiber, prep_effort, estimated, review,
         fat_quality, avail)
+        -- portion_g: граммы порции, на которую даны КБЖУ (обычно 100);
+        -- serving_g: вес одной реальной порции (печенье, батончик, стакан) —
+        --   берётся при логе без граммовки; NULL = порция каталога
         -- prep: low|med|high; estimated/review: флаги оценки и недоразметки
         -- fat_quality: good|neutral|bad (дефолт neutral; рубрика §7)
         -- avail: always|stock|resto:<имя>|NULL — доступность (§10, §12):

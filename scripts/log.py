@@ -21,7 +21,8 @@ A product is resolved in the catalog (data/diet.db): exact name/alias first, the
 a unique substring. No match or several candidates → nothing is written, the
 candidates are printed, exit code ≠ 0. "Name 250г" / "Name 250" / "Name:250г" work
 like "Name:250". Grams scale the catalog macros from its default portion; for
-piece/ml portions the number is pieces/ml.
+piece/ml portions the number is pieces/ml. No weight → the product's serving
+(serving_g) when the catalog has one, else its default portion.
 --fix/--delete match a row by case-insensitive substring of its label, optionally
 narrowed by a leading time; no match or several matches → nothing is written,
 the candidates are printed, exit code ≠ 0.
@@ -96,9 +97,12 @@ def last_logged_grams(name):
 
 def scale(rec, qty):
     """(label, macros) for `qty` of the catalog product `rec` (grams, or
-    pieces/ml when the catalog portion is not in grams; None = one portion)."""
+    pieces/ml when the catalog portion is not in grams; None = its serving,
+    else one catalog portion)."""
     name, raw, pg = rec['name'], rec['portion_raw'] or 'порция', rec['portion_g']
     base = {k: (rec.get(k) or 0.0) for k in MACRO_KEYS}
+    if qty is None and pg and rec.get('serving_g'):
+        qty = rec['serving_g']
     if qty is None:
         label = f'{name} {fmt_g(pg)}г' if pg else f'{name} {raw}'
         return label, base
