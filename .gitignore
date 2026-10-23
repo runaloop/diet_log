@@ -11,3 +11,6 @@ data/profile.json
 # medical tracking — single-device, never published
 config/medications.md
 config/meds/
+
+# research notes, raw workout data, throwaway tools — local only
+/docs/research/

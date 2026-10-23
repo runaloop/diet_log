@@ -13,7 +13,7 @@
 
 ## Файлы и ловушки
 
-Раскладка репозитория — `README.md` («Layout»). Дневник дня — `diaries/YYYY/MM/DD.md`; конфиги — `config/*.md` (`user.md` — рост, история весов, базовый расход; `goals.md`; `cycle.md` — режим; `training_types.md`; `medications.md` — локальный, не в git); спек — `docs/STRATEGY.md`; процедуры редких команд — `docs/agent/*.md`. Локальные файлы, не в git: `ration.md`, `pills.md`, `pills_history.jsonl`, `data/profile.json`.
+Раскладка репозитория — `README.md` («Layout»). Дневник дня — `diaries/YYYY/MM/DD.md`; конфиги — `config/*.md` (`user.md` — рост, история весов, базовый расход; `goals.md`; `cycle.md` — режим; `training_types.md`; `medications.md` — локальный, не в git); спек — `docs/STRATEGY.md`; процедуры редких команд — `docs/agent/*.md`. Локальные файлы, не в git: `ration.md`, `pills.md`, `pills_history.jsonl`, `data/profile.json`, `docs/research/` — исследования вокруг тренировок (одна папка на исследование, оглавление — `docs/research/README.md`).
 
 Скрипты (`scripts/`):
 - `log.py` — запись еды/тренировки одним вызовом (каталог → строка → пересчёт → ответ); `--fix` / `--delete` — исправить или убрать строку

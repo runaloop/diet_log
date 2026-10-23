@@ -62,7 +62,8 @@ Everything committed here is **public** by design — including the weight histo
 - **Public & synced:** engine, product catalog, diaries, weight history, goals.
 - **Local only (gitignored, never published, single-device):** medication / supplement
   tracking (`config/medications.md`, `config/meds/`) and the daily working files
-  `ration.md` / `pills.md`.
+  `ration.md` / `pills.md`, and `docs/research/` (training experiments: raw workout
+  data, analysis scripts, notes).
 
 If you fork this and want a different split, edit `.gitignore` before your first commit.
 
