@@ -36,7 +36,9 @@ appends a new weigh-in with body composition to config/user.md, and with
 (>2% off → constant and effective base updated). --back N repeats the
 workout/NEAT sync for the N previous days. No token file → exits 0
 silently (a machine without Garmin). --fixture FILE feeds the API
-answers from JSON instead (tests, offline).
+answers from JSON instead (tests, offline). A failed apply queues its days
+in data/garmin_pending.json; the next apply retries them (workouts, NEAT,
+weigh-ins) and clears the queue.
 """
 
 import base64
@@ -88,10 +90,15 @@ NATIVE_HEADERS = {
 }
 
 TOKEN_PATH = Path("~/.config/diet-log/garmin_tokens.json").expanduser()
+PENDING_PATH = Path(__file__).resolve().parent.parent / "data" / "garmin_pending.json"
 
 
 class GarminError(Exception):
     pass
+
+
+class GarminUnavailable(GarminError):
+    """Network down, timeout, 5xx, rate limit: retry later, no login needed."""
 
 
 def _request(opener, method, url, params=None, headers=None,
@@ -112,19 +119,24 @@ def _request(opener, method, url, params=None, headers=None,
             return resp.status, resp.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode(errors="replace")
+    except (urllib.error.URLError, OSError) as e:
+        reason = getattr(e, "reason", None) or e
+        raise GarminUnavailable(f"{urllib.parse.urlsplit(url).netloc}: {reason}")
 
 
 def _json_or_die(status, body, what):
     if status == 429:
-        raise GarminError(f"{what}: HTTP 429 — Garmin rate-limited this IP, "
+        raise GarminUnavailable(f"{what}: HTTP 429 — Garmin rate-limited this IP, "
                           "retry in an hour")
     if status == 403:
-        raise GarminError(f"{what}: HTTP 403 — Cloudflare bot challenge; "
+        raise GarminUnavailable(f"{what}: HTTP 403 — Cloudflare bot challenge; "
                           "retry later (login is the only guarded step)")
+    if status >= 500:
+        raise GarminUnavailable(f"{what}: HTTP {status} — Garmin is down, retry later")
     try:
         return json.loads(body)
     except ValueError:
-        raise GarminError(f"{what}: HTTP {status}, non-JSON response "
+        raise GarminUnavailable(f"{what}: HTTP {status}, non-JSON response "
                           f"(first 200 chars): {body[:200]}")
 
 
@@ -729,34 +741,64 @@ def sync_base(d, src, user_path, dry_run):
             f"эффективный {effective} (поправка {correction:+d}); новый дневник возьмёт его из {user_path.name}"]
 
 
+def load_pending(path):
+    """{date: reason} of days whose sync failed and waits for a retry."""
+    if not path or not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_pending(path, pending):
+    if pending:
+        path.write_text(json.dumps(dict(sorted(pending.items())), ensure_ascii=False,
+                                   indent=1) + "\n", encoding="utf-8")
+    elif path.exists():
+        path.unlink()
+
+
 def apply(date_s, back=0, with_base=False, dry_run=False, fixture=None,
-          diary=None, user=None):
+          diary=None, user=None, pending=None):
+    """Sync the diaries with the watch. A failure queues the days in `pending`
+    (default PENDING_PATH for live runs, none for fixtures) and re-raises; the
+    next successful run retries them and clears the queue."""
     from datetime import date as _date, timedelta
     import recalc_plan
     from paths import USER, diary_path
 
-    if fixture:
-        src = Fixture(fixture)
-    else:
-        if not TOKEN_PATH.exists():
-            return 0                       # a machine without Garmin: stay silent
-        src = Live()
+    if not fixture and not TOKEN_PATH.exists():
+        return 0                           # a machine without Garmin: stay silent
+    pending_path = Path(pending) if pending else (None if fixture else PENDING_PATH)
+    queued = {} if diary else load_pending(pending_path)
     user_path = Path(user) if user else USER
     ref = _date.fromisoformat(date_s)
     days = [ref] if diary else [ref - timedelta(days=i) for i in range(back, -1, -1)]
-    report, last_lines = [], None
-    for d in days:
-        path = Path(diary).resolve() if diary else diary_path(d)
-        if not path.exists():
-            report.append(f"{d}: дневника нет — пропуск")
-            continue
-        rep, changed, lines = sync_diary(d, src, path, dry_run)
-        report += rep or [f"{d}: тренировки и докрутка на месте"]
-        if d == ref:
-            last_lines = lines
-    report += sync_weight(ref, src, user_path, dry_run)
-    if with_base:
-        report += sync_base(ref, src, user_path, dry_run)
+    retry = sorted({_date.fromisoformat(k) for k in queued} - set(days))
+    days = sorted(set(days) | set(retry))
+    try:
+        src = Fixture(fixture) if fixture else Live()
+        report, last_lines = [], None
+        if retry:
+            report.append("повтор из очереди: " + ", ".join(d.isoformat() for d in retry))
+        for d in days:
+            path = Path(diary).resolve() if diary else diary_path(d)
+            if not path.exists():
+                report.append(f"{d}: дневника нет — пропуск")
+                continue
+            rep, changed, lines = sync_diary(d, src, path, dry_run)
+            report += rep or [f"{d}: тренировки и докрутка на месте"]
+            if d == ref:
+                last_lines = lines
+        for d in [d for d in retry if d < ref] + [ref]:
+            report += sync_weight(d, src, user_path, dry_run)
+        if with_base:
+            report += sync_base(ref, src, user_path, dry_run)
+    except Exception as e:
+        if pending_path and not dry_run and not diary:
+            queued.update({d.isoformat(): str(e) for d in days})
+            save_pending(pending_path, queued)
+        raise
+    if pending_path and queued and not dry_run:
+        save_pending(pending_path, {})
     if dry_run:
         report = ["(dry-run, ничего не записано)"] + report
     print("\n".join(report))
@@ -808,6 +850,12 @@ def main():
         else:
             print(f"unknown command: {cmd}", file=sys.stderr)
             sys.exit(2)
+    except GarminUnavailable as e:
+        print(f"error: Garmin недоступен — {e}", file=sys.stderr)
+        if cmd == "apply" and PENDING_PATH.exists():
+            print(f"дни в очереди на повтор: {', '.join(load_pending(PENDING_PATH))}",
+                  file=sys.stderr)
+        sys.exit(1)
     except GarminError as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)

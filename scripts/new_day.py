@@ -10,9 +10,10 @@ across AGENTS.md:
      N == D → nothing to close: report and exit 0 without touching anything.
   2. Close D: garmin_sync.apply(D, back=N, with_base=True) — watch workouts,
      the NEAT top-up, the weigh-in and the base expenditure. A machine with no
-     tokens skips it silently. План/format/validate for D run unconditionally
-     afterwards: apply recomputes only what it changed, and nothing at all
-     without Garmin.
+     tokens skips it silently. Garmin failing never stops the day change: the
+     days go to data/garmin_pending.json and the next apply retries them.
+     План/format/validate for D run unconditionally afterwards: apply
+     recomputes only what it changed, and nothing at all without Garmin.
   3. Pills: sync (the leaving day, before pills.md is overwritten) → build N →
      sync again. config/medications.md is only read, never written.
   4. Diary N: weektrend header (--no-groups) + the План block, then today.md is
@@ -22,7 +23,8 @@ across AGENTS.md:
   6. A compact report, then the full weektrend N (with groups) for the chat.
 
 Exit code is non-zero only where a human has to step in: a broken symlink, an
-expired Garmin token, a diary that fails validation.
+expired Garmin token, an unexpected sync crash, a diary that fails validation.
+Garmin being down is not one of them.
 """
 import contextlib
 import io
@@ -64,18 +66,30 @@ def link_date():
 
 def close_day(d, path, back, dry):
     """Garmin sync for the leaving day, then План/format/validate. (report, needs_human)"""
-    out = io.StringIO()
+    out, needs_human = io.StringIO(), False
     try:
         with contextlib.redirect_stdout(out):
             garmin_sync.apply(d.isoformat(), back=back, with_base=True, dry_run=dry)
-    except garmin_sync.GarminError as e:
-        return [f'Garmin: {e}', '  → выполни: python3 scripts/garmin_sync.py login'], True
-    said = [l for l in out.getvalue().rstrip('\n').split('\n')
-            if l.strip() and not l.startswith('(dry-run')]
-    report = ['Garmin:'] + [f'  {l}' for l in said] if said else \
-             ['Garmin: токенов нет — пропуск (это не ошибка)']
+    except Exception as e:
+        if isinstance(e, garmin_sync.GarminUnavailable):
+            report = [f'Garmin недоступен: {e}']
+        elif isinstance(e, garmin_sync.GarminError):
+            report = [f'Garmin: {e}', '  → выполни: python3 scripts/garmin_sync.py login']
+            needs_human = True
+        else:
+            report = [f'Garmin: синк упал — {type(e).__name__}: {e}']
+            needs_human = True
+        queued = garmin_sync.load_pending(garmin_sync.PENDING_PATH)
+        if queued:
+            report.append(f'  дни в очереди на повтор: {", ".join(queued)} — '
+                          f'повторит следующий «синк гармин» или «новый день»')
+    else:
+        said = [l for l in out.getvalue().rstrip('\n').split('\n')
+                if l.strip() and not l.startswith('(dry-run')]
+        report = ['Garmin:'] + [f'  {l}' for l in said] if said else \
+                 ['Garmin: токенов нет — пропуск (это не ошибка)']
     if dry:
-        return report, False
+        return report, needs_human
 
     lines = path.read_text(encoding='utf-8').rstrip('\n').split('\n')
     lines = recalc_plan.apply(lines, recalc_plan.compute(lines, d))
@@ -85,7 +99,7 @@ def close_day(d, path, back, dry):
     report.append(f'Закрыт: {rel(path)}' if not errs else
                   f'Закрыт: {rel(path)} — проверка не прошла:')
     report += [f'  ✗ {e}' for e in errs]
-    return report, bool(errs)
+    return report, needs_human or bool(errs)
 
 
 def run_pills(n, dry):

@@ -32,6 +32,7 @@ AGENTS.md            the agent's instructions — that file *is* the program
 today.md             symlink → diaries/YYYY/MM/DD.md (current day)
 config/              your inputs (goals, cycle, training types, weight history)
 data/diet.db         product catalog (SQLite) — the single source of truth
+data/garmin_pending.json  days whose Garmin sync failed, retried by the next apply (absent when empty)
 diaries/YYYY/MM/DD   one markdown file per day
 scripts/             python helpers (log, recalc_plan, summary, ration planner, db wrapper, validators)
 tests/               unittest suite — `python3 -m unittest discover -s tests`
