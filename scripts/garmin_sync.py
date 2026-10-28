@@ -30,9 +30,16 @@ that are not in the diary yet (zone in the name — from power zones for
 cycling, from HR otherwise; split rows when a Z1–2 and a Z3+ part both
 carry ≥150 kcal, `other` skipped), writes or updates
 the NEAT top-up row «Прочая активность (Garmin)» (skipped when marked
-«ручной фикс» / «не синкать», updated only when off by >20 kcal),
-appends a new weigh-in with body composition to config/user.md, and with
---base compares the 4-week resting average with the constant there
+«ручной фикс» / «не синкать», updated only when off by >20 kcal). The
+day's active kcal is the watch's own tally and arrives with the wellness
+sync, which trails the activity upload: a workout that ends after
+`wellnessEndTimeLocal` is not in the tally yet and is subtracted only for
+the part the tally covers, so a sync right after a workout still writes
+the row (the report says to sync again later). Active kcal ≤ workouts with
+a complete tally (pool swims: the watch counts the swim into the day only
+in part) is reported instead of silently skipped. `apply` also appends a
+new weigh-in with body composition to config/user.md, and with --base
+compares the 4-week resting average with the constant there
 (>2% off → constant and effective base updated). --back N repeats the
 workout/NEAT sync for the N previous days. No token file → exits 0
 silently (a machine without Garmin). --fixture FILE feeds the API
@@ -52,6 +59,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 SSO = "https://sso.garmin.com"
@@ -592,6 +600,26 @@ def workout_rows(a):
     return [(f"{ru} {label} {mins} мин", kcal)]
 
 
+def covered_share(a, wellness_end):
+    """Share of a Garmin activity that the day summary already includes.
+
+    `activeKilocalories` is the watch's tally up to `wellnessEndTimeLocal`
+    (next midnight for a closed day, last wellness sync for today). The
+    activity file uploads first, the tally follows minutes to hours later,
+    so right after a workout the tally may not include it at all: only the
+    part before the tally's end may be subtracted when deriving NEAT.
+    """
+    start, dur = a.get("startTimeLocal"), a.get("duration") or 0
+    if not wellness_end or not start or not dur:
+        return 1.0
+    try:
+        t0 = datetime.fromisoformat(start[:19])
+        end = datetime.fromisoformat(wellness_end[:19])
+    except ValueError:
+        return 1.0
+    return min(1.0, max(0.0, (end - t0).total_seconds() / dur))
+
+
 def training_rows(lines):
     """[(index, time, name, kcal>0)] for the diary's training rows (К<0)."""
     out = []
@@ -621,7 +649,8 @@ def sync_diary(d, src, path, dry_run):
     use_now = WORKOUT_ROW_TIME == "sync" and day == time.strftime("%Y-%m-%d")
     row_time = time.strftime("%H:%M") if use_now else None
     new_rows = []
-    for a in sorted(src.activities(day), key=lambda a: a.get("startTimeLocal", "")):
+    acts = sorted(src.activities(day), key=lambda a: a.get("startTimeLocal", ""))
+    for a in acts:
         start = (a.get("startTimeLocal") or "")[11:16]
         if start in logged_times:
             continue
@@ -636,26 +665,51 @@ def sync_diary(d, src, path, dry_run):
         lines = insert_rows(lines, rows, start)
         changed = True
 
-    active = (src.summary(day) or {}).get("activeKilocalories")
+    summary = src.summary(day) or {}
+    active = summary.get("activeKilocalories")
     if active is not None:
         rows = training_rows(lines)
         neat = [(i, n, k) for i, _, n, k in rows if NEAT_MATCH in n]
         spent = sum(k for _, _, n, k in rows if NEAT_MATCH not in n and not EXTRA_RE.search(n))
+        in_diary = {(n, round(k)) for _, _, n, k in rows}
+        wellness_end = summary.get("wellnessEndTimeLocal")
+        lag = []
+        for a in acts:
+            wrows = workout_rows(a)
+            if not wrows or not all((n, round(k)) in in_diary for n, k in wrows):
+                continue
+            share = covered_share(a, wellness_end)
+            if share < 1.0:
+                spent -= sum(k for _, k in wrows) * (1 - share)
+                lag.append(f"{wrows[0][0]} ({(a.get('startTimeLocal') or '')[11:16]})")
         diff = round(active - spent)
+        note = (f" — часы досинкались до {wellness_end[11:16]}, {', '.join(lag)} ещё не в итоге дня: "
+                f"повторить синк позже" if lag else "")
         if neat:
             i, name, current = neat[0]
             if MANUAL_RE.search(name):
                 report.append(f"{day}: {name} −{current:.0f} — ручной фикс, не трогаю")
+            elif diff <= 0 and not lag:
+                del lines[i]
+                report.append(f"{day}: {NEAT_NAME} убрана (было −{current:.0f}): часы за день {active:.0f} ккал "
+                              f"≤ тренировки {spent:.0f} — расход в дневнике выше часов на {spent - active:.0f}")
+                changed = True
+            elif diff <= 0:
+                report.append(f"{day}: {NEAT_NAME} −{current:.0f} оставлена: часы за день {active:.0f} ккал "
+                              f"≤ тренировки {spent:.0f}{note}")
             elif abs(diff - current) > NEAT_TOLERANCE:
                 cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
                 cells[2] = f"-{diff}"
                 lines[i] = "| " + " | ".join(cells) + " |"
-                report.append(f"{day}: {NEAT_NAME} −{diff} (было −{current:.0f})")
+                report.append(f"{day}: {NEAT_NAME} −{diff} (было −{current:.0f}){note}")
                 changed = True
         elif diff > 0:
             lines = insert_rows(lines, [activity_row(NEAT_TIME, NEAT_NAME, diff)], NEAT_TIME)
-            report.append(f"{day}: + {NEAT_NAME} −{diff}")
+            report.append(f"{day}: + {NEAT_NAME} −{diff}{note}")
             changed = True
+        else:
+            report.append(f"{day}: докрутки нет: часы за день {active:.0f} ккал ≤ тренировки в дневнике "
+                          f"{spent:.0f} — расход в дневнике выше часов на {spent - active:.0f}{note}")
 
     if changed and not dry_run:
         c = recalc_plan.compute(lines, d)
