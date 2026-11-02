@@ -26,7 +26,7 @@
 - `profile.py` — пересборка `data/profile.json`; `caffeine.py` — кофеин за период
 - `format_tables.py`, `validate_diary.py` — выравнивание таблиц, проверка сумм
 - `git_sync.py` — git целиком: `add .` → коммит → push; `-m` задаёт сообщение, без него `day <дата>: update`
-- `today_view.sh` — живой просмотр `today.md` в соседней панели терминала (`glow`, перерисовка по записи в `diaries/`, нужен `inotify-tools`); `today_pane.sh` — открыть её рядом с текущим терминалом Orca, если её там нет (для хука SessionStart)
+- `today_view.sh` — живой просмотр `today.md` в соседней панели терминала (`glow`, перерисовка по записи в `diaries/`, нужен `inotify-tools`); `today_pane.sh` — открыть её рядом с текущим терминалом Orca, если её там нет (хук Claude Code `SessionStart` и плагин opencode `.opencode/plugins/today-pane`)
 - `db` — обёртка каталога: `find` / `add` / `q` / `tag` / `avail` / `priority` / `rename` / `review`
 
 > **КАТАЛОГ ПРОДУКТОВ = `data/diet.db`.** Все операции с каталогом — только через обёртку `scripts/db`: найти — `scripts/db find <подстрока>` (имя или алиас); добавить/обновить — `scripts/db add "<имя>" --port 100г --k .. --b .. --zh .. --u .. [--fiber ..] [--serving 40г] [--alias "a,b"] [--prep low|med|high] [--estimate] [--fat-quality good|bad]`; произвольный запрос — `scripts/db q "select ..."`.
