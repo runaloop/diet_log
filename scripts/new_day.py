@@ -2,6 +2,7 @@
 """Close the day today.md points at, open the next one — in one call.
 
   new_day.py [--date YYYY-MM-DD] [--back N] [--dry-run] [--no-commit]
+  new_day.py --refresh-current [--date YYYY-MM-DD]
 
 The procedure is deterministic, so it lives here instead of being described
 across AGENTS.md:
@@ -20,7 +21,7 @@ across AGENTS.md:
      repointed at it. An existing file is left alone; ration.md is not touched.
   5. Git: git_sync.py with the message "day D: close, start N". Nothing to
      commit and no remote are both fine. --no-commit skips the step.
-  6. A compact report, then the full weektrend N (with groups) for the chat.
+  6. A compact report and the full weektrend N (rolling blocks cover N−7…N−1).
 
 Exit code is non-zero only where a human has to step in: a broken symlink, an
 expired Garmin token, an unexpected sync crash, a diary that fails validation.
@@ -29,7 +30,7 @@ Garmin being down is not one of them.
 import contextlib
 import io
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from paths import ROOT, MEDICATIONS, diary_path
@@ -152,6 +153,28 @@ def open_day(n, dry):
     return report
 
 
+def refresh_current_day(n, path, dry=False):
+    """Refresh today's generated header and plan, preserving all diary rows."""
+    if dry:
+        return [f'(dry-run, ничего не записано)',
+                f'Дневник: обновил бы шапку и План в {rel(path)}']
+    old_lines = path.read_text(encoding='utf-8').rstrip('\n').split('\n')
+    plan_idx = next((i for i, line in enumerate(old_lines)
+                     if line.strip() == '## План'), None)
+    if plan_idx is None:
+        sys.exit(f'{rel(path)}: не найден блок ## План — дневник не обновлён')
+    head = summary.weektrend(n, with_groups=False).split('\n')
+    lines = head + [''] + old_lines[plan_idx:]
+    lines = recalc_plan.apply(lines, recalc_plan.compute(lines, n))
+    path.write_text('\n'.join(lines).rstrip('\n') + '\n', encoding='utf-8')
+    format_file(path)
+    errs = validate(path)
+    if errs:
+        sys.exit('\n'.join([f'{rel(path)}: проверка не прошла после обновления:']
+                           + [f'  ✗ {e}' for e in errs]))
+    return [f'Дневник: {rel(path)} — шапка и План пересчитаны, записи сохранены']
+
+
 def main(argv):
     opts, i = {'back': 2}, 0
     while i < len(argv):
@@ -161,7 +184,7 @@ def main(argv):
             if i >= len(argv):
                 sys.exit(f'{a}: требуется значение')
             opts[a[2:]] = argv[i]
-        elif a in ('--dry-run', '--no-commit'):
+        elif a in ('--dry-run', '--no-commit', '--refresh-current'):
             opts[a[2:]] = True
         else:
             sys.exit(f'неизвестный аргумент {a}')
@@ -171,8 +194,16 @@ def main(argv):
     d, path = link_date()
     n = date.fromisoformat(opts['date']) if 'date' in opts else date.today()
     if n == d:
+        if opts.get('refresh-current'):
+            report = refresh_current_day(n, path, dry)
+            print('\n'.join(report))
+            print()
+            print(summary.weektrend(n, rolling_end=n - timedelta(days=1)))
+            return 0
         print(f'today.md уже указывает на {n} — закрывать нечего, день ещё идёт; подвести его — «итоги дня»')
         return 0
+    if opts.get('refresh-current'):
+        sys.exit('--refresh-current работает только когда today.md уже указывает на эту дату')
     if n < d:
         sys.exit(f'today.md указывает на {d}, а запрошен {n} — назад не закрываю')
 
@@ -196,7 +227,7 @@ def main(argv):
 
     print('\n'.join(report))
     print()
-    print(summary.weektrend(n))
+    print(summary.weektrend(n, rolling_end=n - timedelta(days=1)))
     return 1 if needs_human else 0
 
 

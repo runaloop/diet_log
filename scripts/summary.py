@@ -589,12 +589,14 @@ def month_range(d: date):
     return start, next_m - timedelta(days=1)
 
 
-def weektrend(ref: date, with_groups: bool = True):
+def weektrend(ref: date, with_groups: bool = True, *, rolling_end: date | None = None):
     """Weekly cumulative dashboard at the start of day `ref`: deficit/protein
     trend (records of the ISO week BEFORE `ref`). With `with_groups` (chat
     default) also appends the food-group remainder; the diary block omits it
     (`--no-groups`) since group servings drift over the day and the live view
-    is always `summary.py weektrend`.
+    is always `summary.py weektrend`. Rolling blocks end at `rolling_end`
+    (inclusive), defaulting to `ref`. New-day reports pass yesterday without
+    shifting the heading or ISO-week trend anchored to `ref`.
     """
     week_start, week_end = week_range(ref)
     mode = global_mode()
@@ -649,9 +651,10 @@ def weektrend(ref: date, with_groups: bool = True):
             lines.append(f'- Неполные дни (не в тренде): {", ".join(r["partial"])}')
 
     if with_groups:
+        end = ref if rolling_end is None else rolling_end
         lines.append('')
-        lines += group_remainder_lines(ref)
-        lines += fat_quality_lines(ref)
+        lines += group_remainder_lines(end)
+        lines += fat_quality_lines(end)
     return '\n'.join(lines)
 
 
@@ -694,8 +697,15 @@ def load_catalog_groups():
                JOIN food_group mg ON mg.id = pg.group_id"""):
         pid_groups[pid].append((g, w))
     out = {}
-    for pid, name in con.execute('SELECT id, name FROM product'):
-        out[name.lower()] = pid_groups.get(pid, [])
+    for pid, name, portion_raw in con.execute(
+            'SELECT id, name, portion_raw FROM product'):
+        groups = pid_groups.get(pid, [])
+        out[name.lower()] = groups
+        # log.py appends textual default portions (for example, "порция")
+        # to diary labels when the catalog product has no gram weight.
+        if portion_raw:
+            label = f'{name} {portion_raw}'.strip().lower()
+            out.setdefault(label, groups)
     for pid, text in con.execute('SELECT product_id, text FROM alias'):
         out.setdefault(text.lower(), pid_groups.get(pid, []))
     con.close()
@@ -777,6 +787,16 @@ def group_remainder_lines(ref: date):
         uniq = sorted(set(unmatched))
         sample = ', '.join(uniq[:6]) + ('…' if len(uniq) > 6 else '')
         out += ['', f'- Не привязаны к каталогу: {len(unmatched)} записей ({sample})']
+    from catalog_review import warning_lines
+    from profile import parse_food_rows
+    names = set()
+    for d in _days(win_start, ref):
+        path = diary_path(d)
+        if path.exists():
+            names.update(row[0] for row in parse_food_rows(path.read_text(encoding='utf-8').splitlines()))
+    warnings = warning_lines(names, DB_PATH)
+    if warnings:
+        out += ['', *warnings]
     return out
 
 
@@ -942,11 +962,16 @@ def main():
     cmd = args[0]
     flags = [a for a in args[1:] if a.startswith('--')]
     pos = [a for a in args[1:] if not a.startswith('--')]
+    if cmd not in ('day', 'weektrend', 'week', 'month', 'since-weight') and '..' not in cmd:
+        sys.exit(f'Unknown command: {cmd}')
+    allowed_flags = {'--no-groups'} if cmd == 'weektrend' else set()
+    for flag in flags:
+        if flag not in allowed_flags:
+            sys.exit(f'неизвестный флаг {flag}')
     ref = date.fromisoformat(pos[0]) if pos else date.today()
     show_week = False
 
     if cmd == 'day':
-        ref = date.fromisoformat(args[1]) if len(args) > 1 else date.today()
         data = parse_day(ref)
         if data is None:
             print(f'Нет дневника за {ref}')

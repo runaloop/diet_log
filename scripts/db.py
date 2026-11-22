@@ -12,19 +12,24 @@ Subcommands:
   q "SQL"              run a raw read-only query
   tag NAME g=w …       set a product's food-group weights (clears review)
   priority NAME N      set a product's planner priority (0 default, <0 demote)
+  search-priority NAME N  set search display priority (higher appears first)
   rename OLD NEW       rename a product (keeps id → groups/aliases survive)
   review               list products still needing group tagging
+  choices              list valid food groups and fat-quality values
 
 Schema:
   product(id, name UNIQUE, portion_raw, portion_g, serving_g, k, b, zh, u,
           fiber, prep_effort, estimated, review)
     portion_raw/portion_g — the portion the macros are given for (usually 100г);
     serving_g — optional grams of one real serving, logged when no weight is named
+    search_priority — display order among equally suitable search matches;
+                      never selects an ambiguous product automatically
   alias(product_id, text)
   food_group(id, name UNIQUE, kind, quota_week)
   product_group(product_id, group_id, weight)         -- m2m, composites
 """
 import argparse
+import math
 import re
 import sqlite3
 import sys
@@ -32,6 +37,7 @@ from pathlib import Path
 
 from paths import ROOT, DB_PATH
 import catalog_match
+from catalog_review import SCHEMA as REVIEW_SCHEMA, set_decision, product_warnings, pending_products, migrate_decisions
 
 # Mediterranean group model — STRATEGY.md §6. kind: пол | умеренно | потолок.
 SEED_GROUPS = [
@@ -50,7 +56,7 @@ SEED_GROUPS = [
     ('добавки', 'потолок', 'фон'),
 ]
 
-PORTION_RE = re.compile(r'(\d+(?:[.,]\d+)?)\s*(г|гр|g)\b', re.IGNORECASE)
+PORTION_RE = re.compile(r'([+-]?\d+(?:[.,]\d+)?)\s*(г|гр|g)\b', re.IGNORECASE)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS product (
@@ -64,7 +70,9 @@ CREATE TABLE IF NOT EXISTS product (
   estimated   INTEGER NOT NULL DEFAULT 0,
   review      INTEGER NOT NULL DEFAULT 1,
   fat_quality TEXT NOT NULL DEFAULT 'neutral',
-  priority    INTEGER NOT NULL DEFAULT 0
+  priority    INTEGER NOT NULL DEFAULT 0,
+  avail       TEXT,
+  search_priority INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS alias (
   product_id INTEGER NOT NULL REFERENCES product(id) ON DELETE CASCADE,
@@ -113,12 +121,23 @@ def connect():
         "ALTER TABLE product ADD COLUMN fat_quality TEXT NOT NULL DEFAULT 'neutral'",
         "ALTER TABLE product ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE product ADD COLUMN serving_g REAL",
+        "ALTER TABLE product ADD COLUMN avail TEXT",
+        "ALTER TABLE product ADD COLUMN search_priority INTEGER NOT NULL DEFAULT 0",
     ):
         try:
             con.execute(ddl)
         except sqlite3.OperationalError:
             pass
-    con.commit()
+    con.executescript(REVIEW_SCHEMA)
+    # Retire the removed amino-acid feature in existing catalogs. Keep food
+    # macros, aliases, groups and all other outstanding review decisions.
+    with con:
+        con.execute('BEGIN')
+        migrate_decisions(con)
+        con.execute('DROP TABLE IF EXISTS product_protein_profile')
+        con.execute('DROP TABLE IF EXISTS protein_profile')
+        if con.execute("SELECT 1 FROM product_review WHERE field='protein' LIMIT 1").fetchone():
+            con.execute("DELETE FROM product_review WHERE field='protein'")
     return con
 
 
@@ -170,22 +189,57 @@ def cmd_migrate(con, args):
 
 
 def cmd_add(con, args):
+    existing = con.execute('SELECT id FROM product WHERE name=?', (args.name,)).fetchone()
+    if not args.name.strip():
+        sys.exit('add: нужно непустое имя')
+    for key in ('k', 'b', 'zh', 'u', 'fiber'):
+        value = getattr(args, key)
+        if value is not None and (not math.isfinite(value) or value < 0):
+            sys.exit(f'add: --{key} должен быть конечным неотрицательным числом')
+    if not existing:
+        missing = [f'--{key}' for key in ('port', 'k', 'b', 'zh', 'u')
+                   if getattr(args, key) is None or getattr(args, key) == '']
+        if missing:
+            sys.exit('add: новый продукт не записан; нужны ' + ', '.join(missing) +
+                     '. Справочник: scripts/db choices; правила: docs/agent/catalog.md')
+    groups = parse_groups(con, args.group or [])
+    if args.groups_estimate is not None and not args.group:
+        sys.exit('add: --groups-estimate требует --group')
+    if args.fat_estimate is not None and args.fat_quality is None:
+        sys.exit('add: --fat-estimate требует --fat-quality')
+    for key in ('no_groups', 'review_groups', 'fat_unknown', 'groups_estimate', 'fat_estimate'):
+        if getattr(args, key) is not None and not getattr(args, key).strip():
+            sys.exit(f'add: --{key.replace("_", "-")} требует непустую причину')
     portion_raw, portion_g = parse_portion(args.port)
+    if not existing and not portion_raw:
+        sys.exit('add: новому продукту нужна непустая --port')
+    if portion_raw and re.fullmatch(r'[+-]?\d+(?:[.,]\d+)?', portion_raw):
+        sys.exit('add: у --port нужны единицы, например 100г, 330мл или 1 шт')
+    if portion_g is not None and (not math.isfinite(portion_g) or portion_g <= 0):
+        sys.exit('add: --port должен задавать положительную порцию')
     serving_g = parse_float(re.sub(r'\s*(г|гр|g)\s*$', '', args.serving, flags=re.I)) \
         if args.serving else None
-    if args.serving and not serving_g:
+    if args.serving and (serving_g is None or not math.isfinite(serving_g) or serving_g <= 0):
         sys.exit(f'--serving: нужны граммы, получено «{args.serving}»')
+    fat_per_serving = args.zh or 0
+    if portion_g and serving_g:
+        fat_per_serving *= serving_g / portion_g
+    if (not existing and args.fat_quality is None and args.fat_unknown is None
+            and (fat_per_serving >= 5 or (args.zh and args.zh * 9 >= args.k * 0.3))):
+        args.fat_unknown = 'Источник жира не указан; нейтральный по умолчанию'
+    if not existing and not (args.group or args.no_groups or args.review_groups):
+        args.review_groups = 'Состав не указан; вклад в группы неизвестен'
     avail = parse_avail(args.avail) if args.avail else None
     # An update keeps every field the caller did not pass: `add "<name>" --alias x`
     # must not blank out the macros. None therefore means "leave alone", so a
     # value can be corrected but never cleared through this command.
-    estimated = 1 if args.estimate else None
+    estimated = args.estimate
     cur = con.execute(
         """INSERT INTO product(name, portion_raw, portion_g, serving_g, k, b, zh, u,
                                fiber, prep_effort, estimated, fat_quality, priority,
-                               avail)
+                               avail, search_priority)
            VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?,0),COALESCE(?,'neutral'),
-                   COALESCE(?,0),?)
+                   COALESCE(?,0),?,COALESCE(?,0))
            ON CONFLICT(name) DO UPDATE SET
              portion_raw=COALESCE(excluded.portion_raw, product.portion_raw),
              portion_g=COALESCE(excluded.portion_g, product.portion_g),
@@ -199,19 +253,62 @@ def cmd_add(con, args):
              estimated=COALESCE(?, product.estimated),
              fat_quality=COALESCE(?, product.fat_quality),
              priority=COALESCE(?, product.priority),
-             avail=COALESCE(?, product.avail)
+             avail=COALESCE(?, product.avail),
+             search_priority=COALESCE(?, product.search_priority)
            RETURNING id""",
         (args.name, portion_raw, portion_g, serving_g, args.k, args.b, args.zh, args.u,
          args.fiber, args.prep, estimated, args.fat_quality,
-         args.priority, avail, estimated, args.fat_quality, args.priority, avail))
+         args.priority, avail, args.search_priority, estimated, args.fat_quality,
+         args.priority, avail, args.search_priority))
     pid = cur.fetchone()[0]
     if args.alias:
         for a in (x.strip() for x in args.alias.split(',')):
             if a:
                 con.execute('INSERT OR IGNORE INTO alias(product_id, text) VALUES (?,?)',
                             (pid, a))
+    if args.group or args.no_groups or args.review_groups:
+        con.execute('DELETE FROM product_group WHERE product_id=?', (pid,))
+        con.executemany('INSERT INTO product_group VALUES (?,?,?)',
+                        [(pid, gid, weight) for gid, weight in groups])
+        con.execute('UPDATE product SET review=0 WHERE id=?', (pid,))
+        set_decision(con, pid, 'groups', args.no_groups or args.review_groups or args.groups_estimate,
+                     exempt=bool(args.no_groups),
+                     status='estimated' if args.groups_estimate else 'unknown')
+    if args.fat_quality is not None or args.fat_unknown:
+        if args.fat_unknown:
+            con.execute("UPDATE product SET fat_quality='neutral' WHERE id=?", (pid,))
+        set_decision(con, pid, 'fat', args.fat_unknown or args.fat_estimate,
+                     status='estimated' if args.fat_estimate else 'unknown')
     con.commit()
     print(f'ok #{pid} {args.name}')
+    tags = con.execute('''SELECT g.name,pg.weight FROM product_group pg
+        JOIN food_group g ON g.id=pg.group_id WHERE pg.product_id=?''', (pid,)).fetchall()
+    print('группы: ' + (', '.join(f'{name}={weight:g}' for name, weight in tags) or 'нет'))
+    quality, = con.execute('SELECT fat_quality FROM product WHERE id=?', (pid,)).fetchone()
+    print(f'качество жира: {quality}')
+    for field, status, reason in con.execute(
+            'SELECT field,status,reason FROM product_review WHERE product_id=?', (pid,)):
+        print(f'{field}: {status} — {reason}')
+
+
+def parse_groups(con, pairs):
+    groups = []
+    seen = set()
+    for pair in pairs:
+        name, sep, raw = pair.partition('=')
+        row = con.execute('SELECT id FROM food_group WHERE name=?', (name.strip(),)).fetchone()
+        if not row:
+            sys.exit(f'группы: нет группы {name!r}; см. scripts/db choices')
+        weight = parse_float(raw) if sep else 1.0
+        if weight is None or not math.isfinite(weight) or weight <= 0:
+            sys.exit('группы: вес должен быть конечным положительным числом')
+        if weight > 1 and name.strip() not in ('рыба', 'птица'):
+            sys.exit('группы: вес >1 допустим только для концентрированной рыбы/птицы')
+        if row[0] in seen:
+            sys.exit(f'группы: повтор группы {name!r}')
+        seen.add(row[0])
+        groups.append((row[0], weight))
+    return groups
 
 
 def searchable(con):
@@ -226,34 +323,53 @@ def searchable(con):
     return list(strings.items())
 
 
+def search_priorities(con):
+    return dict(con.execute('SELECT name, search_priority FROM product'))
+
+
 def cmd_find(con, args):
+    priorities = search_priorities(con)
+    exact_name, exact_ties = catalog_match.exact_words(args.substr, searchable(con), priorities)
+    if exact_ties:
+        print('неоднозначно: ' + ', '.join(exact_ties))
+        return
+    if exact_name:
+        rows = con.execute(
+            """SELECT p.name, p.portion_raw, p.serving_g, p.k, p.b, p.zh, p.u, p.fiber,
+                      p.fat_quality, p.avail, p.search_priority FROM product p WHERE p.name = ?""",
+            (exact_name,)).fetchall()
+    else:
+        rows = []
     like = f'%{args.substr.lower()}%'
-    rows = con.execute(
-        """SELECT DISTINCT p.name, p.portion_raw, p.serving_g, p.k, p.b, p.zh, p.u, p.fiber,
-                  p.fat_quality, p.avail
-           FROM product p LEFT JOIN alias a ON a.product_id = p.id
-           WHERE ulower(p.name) LIKE ? OR ulower(a.text) LIKE ?
-           ORDER BY p.name""", (like, like)).fetchall()
+    if not rows:
+        rows = con.execute(
+            """SELECT DISTINCT p.name, p.portion_raw, p.serving_g, p.k, p.b, p.zh, p.u, p.fiber,
+                      p.fat_quality, p.avail, p.search_priority
+               FROM product p LEFT JOIN alias a ON a.product_id = p.id
+               WHERE ulower(p.name) LIKE ? OR ulower(a.text) LIKE ?
+               ORDER BY p.search_priority DESC, p.name""", (like, like)).fetchall()
     if not rows:
         # Substring missed — retry through the token-fuzzy fallback, which
         # survives typos and word order. Browsing lists every hit; picking
         # one is resolve_product's job, not this one's.
-        names = [t[-1] for t in catalog_match.rank(args.substr, searchable(con))]
+        names = [t[-1] for t in catalog_match.rank(args.substr, searchable(con), priorities)]
         if names:
             rows = con.execute(
                 """SELECT p.name, p.portion_raw, p.serving_g, p.k, p.b, p.zh, p.u, p.fiber,
-                          p.fat_quality, p.avail FROM product p
+                          p.fat_quality, p.avail, p.search_priority FROM product p
                    WHERE p.name IN (%s)""" % ','.join('?' * len(names)),
                 names).fetchall()
             rows.sort(key=lambda r: names.index(r[0]))
     if not rows:
         print('— ничего —')
         return
-    for name, port, serving, k, b, zh, u, fib, fq, av in rows:
+    for name, port, serving, k, b, zh, u, fib, fq, av, search_priority in rows:
         if serving:
             port = f'{port} · порция {serving:g}г'
         tag = '' if fq == 'neutral' else f' жир:{fq}'
         tag += f' · {av}' if av else ''
+        if search_priority:
+            tag += f' · приоритет поиска:{search_priority}'
         print(f'{name} [{port}] К{k} Б{b} Ж{zh} У{u} Клет{fib}{tag}')
 
 
@@ -272,16 +388,17 @@ def cmd_tag(con, args):
     if not row:
         sys.exit(f'tag: продукт не найден: {args.name}')
     pid = row[0]
-    for pair in args.pairs:
-        grp, _, w = pair.partition('=')
-        g = con.execute('SELECT id FROM food_group WHERE name = ?', (grp.strip(),)).fetchone()
-        if not g:
-            sys.exit(f'tag: нет группы {grp!r} (см. food_group)')
+    groups = parse_groups(con, args.pairs)
+    for gid, weight in groups:
         con.execute(
             """INSERT INTO product_group(product_id, group_id, weight) VALUES (?,?,?)
                ON CONFLICT(product_id, group_id) DO UPDATE SET weight=excluded.weight""",
-            (pid, g[0], parse_float(w) if w else 1.0))
+            (pid, gid, weight))
     con.execute('UPDATE product SET review = 0 WHERE id = ?', (pid,))
+    # tag augments existing weights: it cannot make their estimates exact.
+    if not con.execute("SELECT 1 FROM product_review WHERE product_id=? "
+                       "AND field='groups' AND status='estimated'", (pid,)).fetchone():
+        set_decision(con, pid, 'groups')
     con.commit()
     tags = con.execute(
         """SELECT mg.name, pg.weight FROM product_group pg
@@ -299,6 +416,15 @@ def cmd_priority(con, args):
     print(f'{args.name}: priority={args.level}')
 
 
+def cmd_search_priority(con, args):
+    cur = con.execute('UPDATE product SET search_priority = ? WHERE name = ?',
+                      (args.level, args.name))
+    if cur.rowcount == 0:
+        sys.exit(f'search-priority: продукт не найден: {args.name}')
+    con.commit()
+    print(f'{args.name}: приоритет поиска={args.level}')
+
+
 def parse_avail(v):
     """always|stock|none|resto:<имя> -> stored value (None clears)."""
     if v == 'none':
@@ -314,6 +440,13 @@ def resolve_product(con, name_q):
                       (name_q,)).fetchone()
     if row:
         return row
+    priorities = search_priorities(con)
+    name, ties = catalog_match.exact_words(name_q, searchable(con), priorities)
+    if ties:
+        sys.exit('неоднозначно: ' + ', '.join(ties))
+    if name:
+        return con.execute('SELECT id, name FROM product WHERE name = ?',
+                           (name,)).fetchone()
     like = f'%{name_q.lower()}%'
     rows = con.execute(
         """SELECT DISTINCT p.id, p.name FROM product p
@@ -321,9 +454,10 @@ def resolve_product(con, name_q):
            WHERE ulower(p.name) LIKE ? OR ulower(a.text) LIKE ?""",
         (like, like)).fetchall()
     if len(rows) > 1:
-        sys.exit('неоднозначно: ' + ', '.join(sorted(n for _, n in rows)))
+        sys.exit('неоднозначно: ' + ', '.join(
+            catalog_match.order_names((n for _, n in rows), priorities)))
     if not rows:
-        name, ties = catalog_match.best(name_q, searchable(con))
+        name, ties = catalog_match.best(name_q, searchable(con), priorities)
         if ties:
             sys.exit('неоднозначно: ' + ', '.join(ties))
         if name is None:
@@ -358,17 +492,29 @@ def cmd_rename(con, args):
 
 
 def cmd_review(con, args):
-    rows = con.execute(
-        'SELECT name FROM product WHERE review = 1 ORDER BY name').fetchall()
+    pending = pending_products(con)
+    rows = product_warnings(con)
+    if args.all:
+        rows += [f'{name}: {field} / {status} — {reason}'
+                 for name, field, status, reason in con.execute(
+                     "SELECT p.name,r.field,r.status,r.reason FROM product_review r "
+                     "JOIN product p ON p.id=r.product_id WHERE r.status!='pending' ORDER BY p.name,r.field")]
     total = con.execute('SELECT COUNT(*) FROM product').fetchone()[0]
-    print(f'без разметки групп: {len(rows)}/{total}')
-    for (name,) in rows[:args.limit]:
-        print(f'  {name}')
+    print(f'требуют проверки: {len(pending)}/{total}')
+    for line in rows[:args.limit]:
+        print(line)
     if len(rows) > args.limit:
         print(f'  … ещё {len(rows) - args.limit}')
 
 
-def main():
+def cmd_choices(con, args):
+    print('Группы (--group ГРУППА=ВЕС; повторять для нескольких):')
+    print(', '.join(row[0] for row in con.execute('SELECT name FROM food_group ORDER BY id')))
+    print('Качество жира (--fat-quality): good, neutral, bad')
+    print('Правила: docs/agent/catalog.md')
+
+
+def main(argv=None):
     p = argparse.ArgumentParser(prog='db')
     sub = p.add_subparsers(dest='cmd', required=True)
 
@@ -388,11 +534,24 @@ def main():
     a.add_argument('--fiber', type=float)
     a.add_argument('--alias', default='')
     a.add_argument('--prep', choices=['low', 'med', 'high'])
-    a.add_argument('--estimate', action='store_true')
-    a.add_argument('--fat-quality', dest='fat_quality',
-                   choices=['good', 'neutral', 'bad'])
+    estimates = a.add_mutually_exclusive_group()
+    estimates.add_argument('--estimate', action='store_const', const=1, default=None)
+    estimates.add_argument('--no-estimate', dest='estimate', action='store_const', const=0,
+                           help='КБЖУ из карточки/от пользователя, а не оценка агента')
+    a.add_argument('--groups-estimate', help='основание приблизительных весов --group; не меняет КБЖУ')
+    a.add_argument('--fat-estimate', help='основание приблизительной категории --fat-quality')
+    fat = a.add_mutually_exclusive_group()
+    fat.add_argument('--fat-quality', dest='fat_quality', choices=['good', 'neutral', 'bad'])
+    fat.add_argument('--fat-unknown', help='причина неизвестного качества жира')
+    groups = a.add_mutually_exclusive_group()
+    groups.add_argument('--group', action='append', help='группа=вес; повторять; заменяет весь набор групп')
+    groups.add_argument('--no-groups', help='почему продукт не относится ни к одной группе')
+    groups.add_argument('--groups-unknown', '--review-groups', dest='review_groups',
+                        help='состав неизвестен; завершённое решение без предупреждений')
     a.add_argument('--priority', type=int,
                    help='planner priority (0 default, <0 demote, >0 prefer)')
+    a.add_argument('--search-priority', type=int,
+                   help='search display priority (0 default, higher appears first; no automatic selection)')
     a.add_argument('--avail', help='always|stock|none|resto:<имя>')
 
     f = sub.add_parser('find')
@@ -409,6 +568,10 @@ def main():
     pr.add_argument('name')
     pr.add_argument('level', type=int)
 
+    spr = sub.add_parser('search-priority')
+    spr.add_argument('name', help='exact catalog name')
+    spr.add_argument('level', type=int, help='0 default; higher appears first')
+
     av = sub.add_parser('avail')
     av.add_argument('name')
     av.add_argument('value', help='always|stock|none|resto:<имя>')
@@ -421,13 +584,21 @@ def main():
 
     r = sub.add_parser('review')
     r.add_argument('--limit', type=int, default=40)
+    r.add_argument('--all', action='store_true', help='также показать принятые допущения и их основания')
+    sub.add_parser('choices')
 
-    args = p.parse_args()
+    args = p.parse_args(argv)
     con = connect()
-    {'init': cmd_init, 'migrate': cmd_migrate, 'add': cmd_add, 'find': cmd_find,
-     'q': cmd_q, 'tag': cmd_tag, 'priority': cmd_priority, 'avail': cmd_avail,
-     'rename': cmd_rename, 'review': cmd_review}[args.cmd](con, args)
-    con.close()
+    try:
+        with con:
+            {'init': cmd_init, 'migrate': cmd_migrate, 'add': cmd_add, 'find': cmd_find,
+             'q': cmd_q, 'tag': cmd_tag, 'priority': cmd_priority,
+             'search-priority': cmd_search_priority, 'avail': cmd_avail,
+             'rename': cmd_rename, 'review': cmd_review, 'choices': cmd_choices}[args.cmd](con, args)
+    except sqlite3.Error as error:
+        sys.exit(f'{args.cmd}: изменения не сохранены: {error}')
+    finally:
+        con.close()
 
 
 if __name__ == '__main__':

@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) && [ -x \"$repo/scripts/today_pane.sh\" ] && \"$repo/scripts/today_pane.sh\"",
+            "async": true,
+            "timeout": 10,
+            "statusMessage": "Opening today.md pane"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -22,6 +22,7 @@ product is worse than a refusal, so a winner must lead the runner-up by
 MARGIN or the caller is handed every tie.
 """
 import re
+from collections import Counter
 from difflib import SequenceMatcher
 
 TOKEN_THRESHOLD = 0.75
@@ -79,7 +80,13 @@ def string_score(q_tokens, cand_tokens):
     return total / len(q_tokens), coverage
 
 
-def rank(query, entries):
+def order_names(names, priorities=None):
+    """Display equally suitable names by search priority, then alphabetically."""
+    priorities = priorities or {}
+    return sorted(names, key=lambda name: (-priorities.get(name, 0), name))
+
+
+def rank(query, entries, priorities=None):
     """[(similarity, coverage, name)] best first, over [(name, [strings...])].
 
     A candidate is scored against each of its strings separately — its own
@@ -99,17 +106,41 @@ def rank(query, entries):
                 best = sc
         if best is not None:
             scored.append((best[0], best[1], name))
-    scored.sort(key=lambda t: (-t[0], -t[1], t[2]))
+    priorities = priorities or {}
+    scored.sort(key=lambda t: (-t[0], -t[1], -priorities.get(t[2], 0), t[2]))
     return scored
 
 
-def best(query, entries):
+def exact_words(query, entries, priorities=None):
+    """Match a complete name or alias with words in any order.
+
+    Returns (name, ties). Unlike fuzzy matching, tokens must be identical and
+    the query must contain every token in the catalog string exactly once.
+    """
+    q_tokens = tokenize(query)
+    if not q_tokens:
+        return None, []
+    wanted = Counter(q_tokens)
+    matches = set()
+    for name, strings in entries:
+        if any(Counter(tokenize(s)) == wanted for s in strings):
+            matches.add(name)
+    if len(matches) == 1:
+        return next(iter(matches)), []
+    if matches:
+        return None, order_names(matches, priorities)
+    return None, []
+
+
+def best(query, entries, priorities=None):
     """(name, ties). Exactly one of them is meaningful.
 
     Returns (name, []) on a clear winner, (None, [tied names]) when the lead
     is under MARGIN, and (None, []) when nothing matched at all.
     """
-    scored = rank(query, entries)
+    # Priority changes presentation only; similarity/coverage still decide
+    # whether a match is unique. A higher priority never breaks ambiguity.
+    scored = rank(query, entries, priorities)
     if not scored:
         return None, []
     top_sim = scored[0][0]
@@ -118,8 +149,8 @@ def best(query, entries):
         return near[0][2], []
     top_cov = near[0][1]
     if top_cov < 1.0:
-        return None, sorted(n for _, _, n in near)
+        return None, [n for _, _, n in near]
     ties = [n for _, cov, n in near if top_cov - cov < COVERAGE_MARGIN]
     if len(ties) > 1:
-        return None, sorted(ties)
+        return None, ties
     return near[0][2], []

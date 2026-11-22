@@ -139,11 +139,16 @@ def load_macros():
     of eating history (needed to pin a dish that's never been a staple)."""
     con = sqlite3.connect(DB_PATH)
     out, by_id = {}, {}
-    for pid, name, portion_raw, portion_g, serving_g, k, b, zh, u, fiber in con.execute(
-            'SELECT id, name, portion_raw, portion_g, serving_g, k, b, zh, u, fiber '
-            'FROM product'):
+    # Logging is read-only for the catalog, including before `db` has added
+    # search_priority to a legacy database.
+    columns = {row[1] for row in con.execute('PRAGMA table_info(product)')}
+    priority_col = 'search_priority' if 'search_priority' in columns else '0'
+    for pid, name, portion_raw, portion_g, serving_g, k, b, zh, u, fiber, search_priority in con.execute(
+            'SELECT id, name, portion_raw, portion_g, serving_g, k, b, zh, u, fiber, '
+            f'{priority_col} FROM product'):
         rec = {'name': name, 'portion_raw': portion_raw, 'portion_g': portion_g,
-               'serving_g': serving_g, 'k': k, 'b': b, 'zh': zh, 'u': u, 'fiber': fiber}
+               'serving_g': serving_g, 'k': k, 'b': b, 'zh': zh, 'u': u, 'fiber': fiber,
+               'search_priority': search_priority}
         out[name.lower()] = rec
         by_id[pid] = rec
     for pid, text in con.execute('SELECT product_id, text FROM alias'):
@@ -163,11 +168,18 @@ def find_canonical(name_q, macros, what='--pin/--exclude'):
     rec = macros.get(key)
     if rec is not None:
         return rec
+    priorities = {rec['name']: rec.get('search_priority', 0) for rec in macros.values()}
+    name, ties = catalog_match.exact_words(name_q, searchable(macros), priorities)
+    if ties:
+        sys.exit(f'{what}: неоднозначно ({", ".join(ties)}): {name_q}')
+    if name is not None:
+        return next(v for v in macros.values() if v['name'] == name)
     cands = {v['name'] for k, v in macros.items() if key in k}
     if len(cands) > 1:
-        sys.exit(f'{what}: неоднозначно ({", ".join(sorted(cands))}): {name_q}')
+        ordered = catalog_match.order_names(cands, priorities)
+        sys.exit(f'{what}: неоднозначно ({", ".join(ordered)}): {name_q}')
     if not cands:
-        name, ties = catalog_match.best(name_q, searchable(macros))
+        name, ties = catalog_match.best(name_q, searchable(macros), priorities)
         if ties:
             sys.exit(f'{what}: неоднозначно ({", ".join(ties)}): {name_q}')
         if name is None:
@@ -440,19 +452,19 @@ def protein_topup(dishes, rem_prot, ration, servings, used, room, group_count,
     return rem_prot
 
 
-def plan_budget(plan, load):
+def plan_budget(plan, load, mode):
     """The day's kcal budget the fat share is taken from (STRATEGY.md §7)."""
-    return day_budget(plan['base'], plan['spent'], load, mode=plan['phase'])
+    return day_budget(plan['base'], plan['spent'], load, mode=mode)
 
 
 def fat_floor_topup(dishes, ration, plan, servings, used, room, group_count,
-                    kcal_left, cal_cap, max_dishes, eaten, seed, load):
+                    kcal_left, cal_cap, max_dishes, eaten, seed, load, mode):
     """Fat floor — the bottom of the day's fat range (STRATEGY.md §7: rest
     35–42% of the day's kcal budget, mid 30–35%, high 25–30%): don't leave
     the planned day below it. Good fat first (олива/орехи/рыба — the default
     fat, §7), bad-fat dishes never close a health floor. Softer than
     protein: stays inside the kcal ceiling and under the cap."""
-    ffloor, fcap = fat_range(load, budget=plan_budget(plan, load))
+    ffloor, fcap = fat_range(load, budget=plan_budget(plan, load, mode))
     day_fat = plan['fat_eaten'] + sum(d['zh'] for d in ration)
     room = limit_headroom(servings)
     while day_fat < ffloor - FAT_TOL and n_dishes(ration) < max_dishes:
@@ -502,7 +514,7 @@ def build(plan, dishes, servings, eaten, seed, mode, load='low',
     # The day's fat cap (top of the load-cycled range, STRATEGY.md §7) is
     # hard for the generated plan; freed kcal flow to carbs, not to fattier
     # dishes. The bottom of the range is topped up last (fat_floor_topup).
-    fcap = fat_range(load, budget=plan_budget(plan, load))[1]
+    fcap = fat_range(load, budget=plan_budget(plan, load, mode))[1]
     fat_left = max(0.0, fcap - plan['fat_eaten'])
     # One dish must not swallow the day (median-portion giants).
     cal_cap = MAX_DISH_KCAL_SHARE * plan['base'] if plan['base'] else float('inf')
@@ -559,7 +571,7 @@ def build(plan, dishes, servings, eaten, seed, mode, load='low',
     # bottom with good fat inside whatever kcal ceiling is left.
     kcal_left = plan['kcal'] - sum(d['k'] for d in ration)
     fat_floor_topup(dishes, ration, plan, servings, used, room, group_count,
-                    kcal_left, cal_cap, max_dishes, eaten, seed, load)
+                    kcal_left, cal_cap, max_dishes, eaten, seed, load, mode)
     return merge_repeats(ration), floor
 
 
@@ -595,7 +607,7 @@ def dish_label(d):
 
 
 def render(plan, ration, floor, servings, mode, load):
-    ffloor, fcap = fat_range(load, budget=plan_budget(plan, load))
+    ffloor, fcap = fat_range(load, budget=plan_budget(plan, load, mode))
     print(f"Режим: {mode} | потолок ккал: {plan['kcal']:.0f} | "
           f"белок-флор: {floor:.0f}г (съедено {plan['prot_eaten']:.0f}) | "
           f"жир: {ffloor:.0f}–{fcap:.0f}г (день: {DAY_LOAD_LABEL[load]}, "

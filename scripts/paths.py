@@ -4,6 +4,7 @@ All data lives outside scripts/. Scripts compute paths from the repo ROOT
 (scripts/'s parent), never from their own dir, so moving a script never
 re-points its data. Import from here instead of recomputing BASE locally.
 """
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -11,7 +12,7 @@ CONFIG = ROOT / 'config'
 DATA = ROOT / 'data'
 DIARIES = ROOT / 'diaries'
 
-DB_PATH = DATA / 'diet.db'
+DB_PATH = Path(os.environ.get('DIET_DB') or DATA / 'diet.db').expanduser()
 PROFILE_PATH = DATA / 'profile.json'
 RATION = ROOT / 'ration.md'
 PILLS = ROOT / 'pills.md'

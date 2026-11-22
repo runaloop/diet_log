@@ -42,6 +42,7 @@ from plan_ration import load_macros, find_canonical, diary_date
 from profile import parse_food_rows, load_canon
 from format_tables import format_file, format_text
 from validate_diary import validate
+from catalog_review import warning_lines as catalog_warning_lines
 import recalc_plan
 
 TIME_RE = re.compile(r'^\d{2}:\d{2}$')
@@ -272,6 +273,7 @@ def main(argv):
     t = o['time'] or (target[1] if target else datetime.now().strftime('%H:%M'))
 
     rows = []
+    catalog_names = []
     if o['macros']:
         name, grams = split_spec(o['specs'][0].strip())
         label = f'{name} {fmt_g(grams)}г' if grams else name
@@ -283,6 +285,7 @@ def main(argv):
         for spec in o['specs']:
             name_q, grams = split_spec(spec)
             rec = find_canonical(name_q, macros, what='log')
+            catalog_names.append(rec['name'])
             if grams is None and o['portion'] == 'median':
                 grams = profile_median(rec['name'])
             elif grams is None and o['portion'] == 'last':
@@ -317,6 +320,8 @@ def main(argv):
         print(format_text('\n'.join(recalc_plan.TABLE_HEADER + rows)))
         print()
     print('\n'.join(recalc_plan.status_block(c, ref, lines)))
+    for line in catalog_warning_lines(catalog_names):
+        print(line)
     errs = validate(path)
     if errs:
         print('\n⚠ validate_diary:\n' + '\n'.join(f'   ✗ {e}' for e in errs))

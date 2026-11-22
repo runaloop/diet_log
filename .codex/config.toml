@@ -1,0 +1,13 @@
+model = "gpt-6-luna"
+model_reasoning_effort = "high"
+
+# Review only actions that exceed the permissions configured below.
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
+sandbox_mode = "workspace-write"
+
+# Network is required for daily sync and online lookups.
+# Allow Garmin token refresh while keeping the rest of home protected.
+[sandbox_workspace_write]
+network_access = true
+writable_roots = ["/home/apikalov/.config/diet-log"]

@@ -14,6 +14,11 @@ and `docs/agent/` (procedures read on demand); the arithmetic lives in `scripts/
 
 - **Food logging.** "235г греческого йогурта" → catalog lookup → diary row with K/B/Zh/U.
   Unknown products are looked up online and added to the catalog.
+- **Automatic food classification.** The agent estimates food-group contributions
+  from the dish type when a recipe is unavailable. Annotation estimates are separate
+  from nutritional values. Unknown composition is an accepted outcome, with no
+  repeated logging warnings; assumptions remain inspectable via `db review --all`.
+  See [`catalog.md`](docs/agent/catalog.md).
 - **Energy balance.** Base expenditure (resting metabolic rate) + logged training −
   food eaten → daily deficit, with macro targets (protein floor by bodyweight, carbs
   as the remainder, fat band).
@@ -24,7 +29,6 @@ and `docs/agent/` (procedures read on demand); the arithmetic lives in `scripts/
 - **Ration planner.** Suggests what to eat from your frequent staples to hit the day's
   target instead of discovering an overshoot after the fact.
 - **Period summaries.** Day / week / month rollups via `scripts/summary.py`.
-
 ## Layout
 
 ```
@@ -35,9 +39,31 @@ data/diet.db         product catalog (SQLite) — the single source of truth
 data/garmin_pending.json  days whose Garmin sync failed, retried by the next apply (absent when empty)
 diaries/YYYY/MM/DD   one markdown file per day
 scripts/             python helpers (log, recalc_plan, summary, ration planner, db wrapper, validators)
+.codex/hooks.json    Codex SessionStart hook that opens the live today.md pane in Orca
 tests/               unittest suite — `python3 -m unittest discover -s tests`
 .pi/extensions/      pi-only project extension for the local Bonsai model — `node --test tests/bonsai_guard.test.mjs`
 ```
+
+Tests of the catalog CLI use `DIET_DB=/tmp/catalog.db` to select an isolated
+database; without this override all scripts use `data/diet.db`.
+
+### Codex diary pane in Orca
+
+`scripts/today_pane.sh` opens the live diary next to the calling terminal. A lock
+detects a running viewer; local records in `data/today_panes/` remember each tab's
+viewer pane across restarts, using its stable leaf ID rather than its title.
+The launcher restarts a stopped viewer only at an empty shell prompt, accounting
+for wrapped screen rows. If its pane is busy, disconnected, or unreadable, it
+leaves the layout unchanged instead of adding a duplicate. Saved `today.md`
+titles recover older panes; the viewer leaves its title in place on exit.
+Concurrent hooks are serialized per tab. An ambiguous caller does not trigger a
+split in another agent's tab. The viewer requires `glow`,
+`inotifywait`, and `flock` (util-linux).
+
+Codex 0.166 defers `SessionStart` until the
+first message, so `.codex/hooks.json` alone cannot open the pane on the empty start
+screen. To open it immediately, call the script before `codex` from your shell
+launcher. Keep the hook as a fallback for session startup and resume.
 
 ## Use it for yourself
 

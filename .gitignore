@@ -6,6 +6,7 @@ __pycache__/
 /pills.md
 /pills_history.jsonl
 data/profile.json
+data/today_panes/
 .claude/settings.local.json
 
 # medical tracking — single-device, never published

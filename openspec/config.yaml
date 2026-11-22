@@ -1,0 +1,25 @@
+schema: spec-driven
+
+context: |
+  Language: English. Keep structural headings and SHALL/MUST keywords in English.
+  Diet Log is a Python agent-operated CLI with machine-readable Markdown and a SQLite catalog.
+  AGENTS.md, docs/STRATEGY.md and docs/agent/ remain applicable; retain them in place.
+  Current behavior belongs in openspec/specs; active change deltas describe proposals, not shipped code.
+  The pilot addresses planner mode authority only: resolve global mode once for one invocation.
+  Assume the stored Plan has already been recalculated under current configuration by the existing workflow.
+  Refreshing or rejecting stale stored kcal/carbohydrate values is outside this change.
+  Preserve legacy parsing, load selection, output/write boundaries and unrelated concurrent edits.
+  Tests must copy the engine into a temporary root with entirely synthetic fixtures;
+  DIET_DB alone does not isolate checkout-bound config, diaries, profile or ration paths.
+  Do not read live personal data or credentials for engineering preparation or tests.
+  Do not change medical/nutrition formulas, catalog data, automation or historical records in this pilot.
+rules:
+  proposal:
+    - Identify the observed gap, sources, narrow scope and explicit non-goals.
+  design:
+    - Separate current behavior, proposed decisions and the stored-Plan freshness assumption.
+  specs:
+    - Use testable requirements and scenarios; do not describe the observed dual-source bug as desired behavior.
+  tasks:
+    - Keep implementation and verification tasks unchecked until actually completed.
+    - Require a temporary copied engine with synthetic inputs before executing product checks.
