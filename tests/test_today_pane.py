@@ -23,7 +23,12 @@ def reply(result):
     print(json.dumps({'ok': True, 'result': result}))
 with (root / 'calls.jsonl').open('a') as out:
     out.write(json.dumps(args) + '\n')
-if command == 'list':
+if args[:2] == ['orchestration', 'worker-list']:
+    file = root / 'workers.json'
+    page = option('--cursor') if '--cursor' in args else 'first'
+    pages = json.loads(file.read_text()) if file.exists() else {'first': {'workers': []}}
+    reply(pages[page])
+elif command == 'list':
     reply({'terminals': json.loads((root / 'terminals.json').read_text())})
 elif command == 'read':
     if (root / 'read_error').exists():
@@ -133,6 +138,26 @@ class TodayPaneTest(unittest.TestCase):
     def calls(self, command):
         return [args for args in map(json.loads, (self.root / 'calls.jsonl').read_text().splitlines())
                 if args[1] == command]
+
+    def test_owned_worker_never_creates_or_wakes_a_diary_viewer(self):
+        # During startup and on a resumed task the agent handle may still be missing.
+        pages = {'first': {'workers': [], 'page': {'hasMore': True, 'nextCursor': 'second'}},
+                 'second': {'workers': [{'resource': {'terminalHandle': 'self', 'ownershipState': 'owned'}}]}}
+        (self.root / 'workers.json').write_text(json.dumps(pages))
+        for panes in (self.terminals[:1], self.terminals):
+            self.terminals = panes
+            self.save_terminals()
+            result = self.launch()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self.calls('split'))
+            self.assertFalse(self.calls('send'))
+
+    def test_other_worker_does_not_hide_the_diary_in_a_user_tab(self):
+        workers = [{'resource': {'terminalHandle': 'another', 'ownershipState': 'owned'}}]
+        (self.root / 'workers.json').write_text(json.dumps({'first': {'workers': workers}}))
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.calls('send')), 1)
 
     def hold_viewer_lock(self, handle):
         result = subprocess.run(['bash', '-c',

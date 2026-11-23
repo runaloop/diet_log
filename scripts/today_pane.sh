@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Open one diary pane per Orca tab, or restart its viewer in the saved pane.
+# Open one diary pane per interactive Orca tab, or restart its saved viewer.
 # Called by shell launchers, SessionStart hooks and the opencode plugin.
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -32,6 +32,20 @@ self=$(jq -r --arg h "${ORCA_TERMINAL_HANDLE:-}" --arg p "$PWD" '
 tab=$(jq -r --arg h "$self" '
   .result.terminals[] | select(.handle == $h) | .tabId // empty' <<<"$list")
 [ -n "$tab" ] || exit 0
+
+# Orca releases only the terminal it created for a worker. A sibling viewer
+# would keep that tab alive. Match the owned handle even during startup, when
+# the worker may not have reported its agent terminal yet.
+cursor=()
+while workers=$("${orca[@]}" orchestration worker-list --environment local --terminal-state active \
+                 --limit 100 --full --json "${cursor[@]}" 2>/dev/null); do
+  jq -e --arg h "$self" 'any(.result.workers[]?;
+    .resource.terminalHandle == $h and .resource.ownershipState == "owned")' \
+    <<<"$workers" >/dev/null && exit 0
+  next=$(jq -er '.result.page | select(.hasMore) | .nextCursor | strings | select(length > 0)' \
+         <<<"$workers") || break
+  cursor=(--cursor "$next")
+done
 
 # Startup/resume hooks can overlap, including while Orca starts the command.
 launch_lock=$(today_lock_file "launcher:$tab") || exit 1

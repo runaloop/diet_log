@@ -49,7 +49,8 @@ database; without this override all scripts use `data/diet.db`.
 
 ### Codex diary pane in Orca
 
-`scripts/today_pane.sh` opens the live diary next to the calling terminal. A lock
+`scripts/today_pane.sh` opens the live diary next to the calling terminal in interactive diary tabs.
+It skips terminals owned by Orca workers so their tabs close when their tasks finish. A lock
 detects a running viewer; local records in `data/today_panes/` remember each tab's
 viewer pane across restarts, using its stable leaf ID rather than its title.
 The launcher restarts a stopped viewer only at an empty shell prompt, accounting
