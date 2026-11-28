@@ -1,1 +1,1 @@
-diaries/2026/11/26.md
+diaries/2026/11/28.md
